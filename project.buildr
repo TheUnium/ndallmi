@@ -1,0 +1,40 @@
+# Created by Unium on 12.02.26
+
+project {
+    name = "llmpp",
+    version = "0.0.1",
+    description = "Model Loader and Inference Engine",
+    language = "cpp",
+    cpp_standard = 17
+}
+
+executable "llm" {
+    src = [
+        globs {
+            "src/**/*.cpp"
+        }
+    ],
+    include = {
+        public = ["src"]
+    },
+    configs {
+        debug {
+            defines = [],
+            flags = ["-g", "-Wall", "-Wextra", "-pthread"]
+        }
+        release {
+            defines = ["NDEBUG"],
+            flags = [
+                "-Wall",
+                "-Wextra",
+                "-O3",
+                "-ffast-math",
+                "-march=native",
+                "-flto",
+                "-funroll-loops",
+                "-pthread"
+            ]
+        }
+    }
+}
+
