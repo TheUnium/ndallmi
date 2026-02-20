@@ -1,4 +1,4 @@
-// Created by Unium on 12.02.26
+// Created by Unium on 20.02.26
 
 #include "mtTnTnsr.hpp"
 #include <algorithm>
@@ -235,10 +235,21 @@ auto CTensor::Ones(const std::vector<int64_t> &vlShape, EType eType) -> CTensor 
 auto CTensor::Fill(const std::vector<int64_t> &vlShape, float fVal, EType eType) -> CTensor {
     CTensor t(vlShape, eType);
     assert(eType == EType::F32 && "[ct:fill:vector] fill only supports f32 for now");
+    int64_t lN = t.lNumel();
     float *pfPtr = t.pfData();
-    for (int64_t i = 0; i < t.lNumel(); i++) {
-        pfPtr[i] = fVal;
+    if (fVal == 0.0f) {
+        std::memset(pfPtr, 0, lN * sizeof(float));
+        return t;
     }
+
+    pfPtr[0] = fVal;
+    int64_t lFilled = 1;
+    while (lFilled < lN) {
+        int64_t lChunk = std::min(lFilled, lN - lFilled);
+        std::memcpy(pfPtr + lFilled, pfPtr, lChunk * sizeof(float));
+        lFilled += lChunk;
+    }
+
     return t;
 }
 
@@ -251,12 +262,36 @@ auto CTensor::Fill(const std::vector<int64_t> &vlShape, float fVal, EType eType)
 auto CTensor::Rand(const std::vector<int64_t> &vlShape, EType eType) -> CTensor {
     CTensor t(vlShape, eType);
     assert(eType == EType::F32 && "[ct:rand:vector] rand only supports f32 for now");
+
     static std::mt19937 s_rng(42);
-    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    int64_t lN = t.lNumel();
     float *pfPtr = t.pfData();
-    for (int64_t i = 0; i < t.lNumel(); i++) {
-        pfPtr[i] = dist(s_rng);
+
+    // gen as uint32 and convert to [0,1] using bit magic
+    // [ieee 754] force range [1, 2] and yoink 1.0
+    auto *pU32 = reinterpret_cast<uint32_t *>(pfPtr);
+    int64_t i = 0;
+
+    for (; i + 3 < lN; i += 4) {
+        uint32_t r0 = s_rng();
+        uint32_t r1 = s_rng();
+        uint32_t r2 = s_rng();
+        uint32_t r3 = s_rng();
+        pU32[i + 0] = (r0 >> 9) | 0x3F800000u;
+        pU32[i + 1] = (r1 >> 9) | 0x3F800000u;
+        pU32[i + 2] = (r2 >> 9) | 0x3F800000u;
+        pU32[i + 3] = (r3 >> 9) | 0x3F800000u;
+        pfPtr[i + 0] -= 1.0f;
+        pfPtr[i + 1] -= 1.0f;
+        pfPtr[i + 2] -= 1.0f;
+        pfPtr[i + 3] -= 1.0f;
     }
+    for (; i < lN; i++) {
+        uint32_t r = s_rng();
+        pU32[i] = (r >> 9) | 0x3F800000u;
+        pfPtr[i] -= 1.0f;
+    }
+
     return t;
 }
 // >>>s_end(factory_vector)
@@ -485,22 +520,49 @@ auto CTensor::Contiguous() const -> CTensor {
 
     CTensor tOut(std::vector<int64_t>(m_lShape, m_lShape + m_iNdim), m_eType);
 
+    const float *pfSrc = static_cast<const float *>(m_pData);
+    float *pfDst = tOut.pfData();
+
+    // 2d transpose (literally 99.99% of cases)
+    if (m_iNdim == 2) {
+        int64_t lRows = m_lShape[0];
+        int64_t lCols = m_lShape[1];
+        int64_t lStride0 = m_lStride[0];
+        int64_t lStride1 = m_lStride[1];
+
+        // why onion whyyyy 😢😢😢😢😢😢 onion whyy 😢 why onion why make cpu cryy whyyyyy
+        constexpr int64_t kBlock = 16;
+        for (int64_t r = 0; r < lRows; r += kBlock) {
+            int64_t rEnd = std::min(r + kBlock, lRows);
+            for (int64_t c = 0; c < lCols; c += kBlock) {
+                int64_t cEnd = std::min(c + kBlock, lCols);
+                for (int64_t rr = r; rr < rEnd; rr++) {
+                    int64_t lDstBase = rr * lCols;
+                    int64_t lSrcBase = rr * lStride0;
+                    for (int64_t cc = c; cc < cEnd; cc++) {
+                        pfDst[lDstBase + cc] = pfSrc[lSrcBase + cc * lStride1];
+                    }
+                }
+            }
+        }
+        return tOut;
+    }
+
     int64_t lN = lNumel();
-    std::vector<int64_t> vlIdx(m_iNdim, 0);
+    int64_t lIdx[mmDims] = {};
 
     for (int64_t lFlat = 0; lFlat < lN; lFlat++) {
         int64_t lSrcOff = 0;
         for (int d = 0; d < m_iNdim; d++) {
-            lSrcOff += vlIdx[d] * m_lStride[d];
+            lSrcOff += lIdx[d] * m_lStride[d];
         }
 
-        tOut.pfData()[lFlat] = static_cast<const float *>(m_pData)[lSrcOff];
+        pfDst[lFlat] = pfSrc[lSrcOff];
 
         for (int d = m_iNdim - 1; d >= 0; d--) {
-            vlIdx[d]++;
-            if (vlIdx[d] < m_lShape[d])
+            if (++lIdx[d] < m_lShape[d])
                 break;
-            vlIdx[d] = 0;
+            lIdx[d] = 0;
         }
     }
 
