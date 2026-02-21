@@ -269,7 +269,6 @@ auto CTensor::Rand(const std::vector<int64_t> &vlShape, EType eType) -> CTensor 
 
     // gen as uint32 and convert to [0,1] using bit magic
     // [ieee 754] force range [1, 2] and yoink 1.0
-    auto *pU32 = reinterpret_cast<uint32_t *>(pfPtr);
     int64_t i = 0;
 
     for (; i + 3 < lN; i += 4) {
