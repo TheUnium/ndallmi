@@ -297,8 +297,10 @@ auto CTensor::Rand(const std::vector<int64_t> &vlShape, EType eType) -> CTensor 
     }
     for (; i < lN; i++) {
         uint32_t r = s_rng();
-        pU32[i] = (r >> 9) | 0x3F800000u;
-        pfPtr[i] -= 1.0f;
+        uint32_t uVal = (r >> 9) | 0x3F800000u;
+        float fVal;
+        std::memcpy(&fVal, &uVal, sizeof(float));
+        pfPtr[i] = fVal - 1.0f;
     }
 
     return t;
