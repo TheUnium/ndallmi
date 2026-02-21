@@ -87,7 +87,8 @@ static void CheckTensorsClose(const MT::CTensor &tA, const MT::CTensor &tB, floa
     static void Test_##name();                                                                                         \
     struct SReg_##name {                                                                                               \
         SReg_##name() { vtGetTests().push_back({#name, s_szCurrentModule, Test_##name}); }                             \
-    } s_reg_##name;                                                                                                    \
+    };                                                                                                                 \
+    static SReg_##name s_reg_##name;                                                                                   \
     static void Test_##name()
 
 /*---------------------------------------------------------
