@@ -1462,6 +1462,24 @@ TEST(bench_matmul_medium) {
     });
 }
 
+TEST(bench_matmul_large) {
+    auto tA = CTensor::Rand({512, 512});
+    auto tB = CTensor::Rand({512, 512});
+    Bench("matmul 512x512", 50, [&]() {
+        auto tC = OP::Matmul(tA, tB);
+        (void)tC;
+    });
+}
+
+TEST(bench_matmul_even_larger) {
+    auto tA = CTensor::Rand({1024, 1024});
+    auto tB = CTensor::Rand({1024, 1024});
+    Bench("matmul 1024x1024", 50, [&]() {
+        auto tC = OP::Matmul(tA, tB);
+        (void)tC;
+    });
+}
+
 TEST(bench_softmax) {
     auto t = CTensor::Rand({64, 512});
     Bench("softmax 64x512", 500, [&]() {
@@ -1492,6 +1510,15 @@ TEST(bench_matvec) {
     auto tMat = CTensor::Rand({512, 512});
     auto tVec = CTensor::Rand({512});
     Bench("matvec 512x512", 1000, [&]() {
+        auto tO = OP::Matvec(tMat, tVec);
+        (void)tO;
+    });
+}
+
+TEST(bench_matvec_large) {
+    auto tMat = CTensor::Rand({1024, 1024});
+    auto tVec = CTensor::Rand({1024});
+    Bench("matvec 1024x1024", 1000, [&]() {
         auto tO = OP::Matvec(tMat, tVec);
         (void)tO;
     });
