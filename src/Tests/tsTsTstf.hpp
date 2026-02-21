@@ -9,6 +9,7 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -17,6 +18,7 @@
 // --- test framework
 static int s_iTestsRun = 0;
 static int s_iTestsPassed = 0;
+static int s_iTestsFailed = 0;
 static const char *s_szCurrentModule = nullptr;
 
 struct STestEntry {
@@ -62,9 +64,9 @@ static void CheckClose(float fA, float fB, float fTol = 1e-4f) {
  *-------------------------------------------------------*/
 static void CheckTensorsClose(const MT::CTensor &tA, const MT::CTensor &tB, float fTol = 1e-3f) {
     Check(tA.m_iNdim == tB.m_iNdim, "ndim mismatch");
-    for (int i = 0; i < tA.m_iNdim; i++) {
+    for (int i = 0; i < tA.m_iNdim; i++)
         Check(tA.m_lShape[i] == tB.m_lShape[i], "shape mismatch");
-    }
+
     for (int64_t i = 0; i < tA.lNumel(); i++) {
         float fDiff = std::fabs(tA.pfData()[i] - tB.pfData()[i]);
         if (fDiff > fTol) {
@@ -100,12 +102,14 @@ static void CheckTensorsClose(const MT::CTensor &tA, const MT::CTensor &tB, floa
 static void Bench(const char *szName, int iIters, std::function<void()> lfnWork) {
     for (int i = 0; i < 3; i++)
         lfnWork();
+
     auto tStart = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < iIters; i++)
         lfnWork();
     auto tEnd = std::chrono::high_resolution_clock::now();
+
     double dMs = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
-    std::cout << "  [bench] " << szName << ": " << dMs / iIters << " ms avg (" << iIters << " iters)" << std::endl;
+    std::cout << "           " << szName << ": " << dMs / iIters << " ms avg (" << iIters << " iters)" << std::endl;
 }
 
 /*---------------------------------------------------------
@@ -128,27 +132,52 @@ static bool bMatchesFilter(const char *szModule, const char *szFilter) {
  *-------------------------------------------------------*/
 static void RunTests(const char *szFilter) {
     const char *szLastModule = nullptr;
+
     for (auto &tEntry : vtGetTests()) {
         if (!bMatchesFilter(tEntry.szModule, szFilter))
             continue;
 
         if (szLastModule == nullptr || std::strcmp(szLastModule, tEntry.szModule) != 0) {
-            std::cout << std::endl;
-            std::cout << "--- " << tEntry.szModule << std::endl;
+            std::cout << std::endl << "--- " << tEntry.szModule << std::endl;
             szLastModule = tEntry.szModule;
         }
 
         s_iTestsRun++;
-        std::cout << "  [test] " << tEntry.szName << "... ";
+
+        std::ostringstream ossCapture;
+        std::streambuf *pOldBuf = std::cout.rdbuf(ossCapture.rdbuf());
+
+        bool bPassed = false;
+        std::string szError;
         try {
             tEntry.pfnTest();
-            s_iTestsPassed++;
-            std::cout << "passed!" << std::endl;
+            bPassed = true;
         } catch (const std::exception &e) {
-            std::cout << "failed: " << e.what() << std::endl;
+            szError = e.what();
         } catch (...) {
-            std::cout << "failed (?)" << std::endl;
+            szError = "unknown exception???";
+        }
+
+        std::cout.rdbuf(pOldBuf);
+
+        if (bPassed) {
+            s_iTestsPassed++;
+            std::cout << "  [pass] " << tEntry.szName << std::endl;
+        } else {
+            s_iTestsFailed++;
+            std::cout << "  [FAIL] " << tEntry.szName << std::endl;
+            std::cout << "         " << szError << std::endl;
+        }
+
+        std::string szCaptured = ossCapture.str();
+        if (!szCaptured.empty()) {
+            std::istringstream iss(szCaptured);
+            std::string szLine;
+            while (std::getline(iss, szLine))
+                std::cout << "           " << szLine << std::endl;
         }
     }
+
+    std::cout << std::endl;
 }
 // >>>s_end(testf)
