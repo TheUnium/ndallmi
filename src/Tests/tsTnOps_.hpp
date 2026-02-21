@@ -4,12 +4,12 @@
 
 #include "../Tensor/mtTnOps_.hpp"
 #include "../Tensor/mtTnTnsr.hpp"
+#include "tsTsTstf.hpp"
 
 #include <cmath>
-#include <iostream>
-#include <stdexcept>
-#include <string>
 #include <vector>
+
+using namespace MT;
 
 // <<<s_start(element_wb)
 // --- element wise binary

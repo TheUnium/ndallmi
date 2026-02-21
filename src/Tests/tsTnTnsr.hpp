@@ -3,12 +3,13 @@
 #pragma once
 
 #include "../Tensor/mtTnTnsr.hpp"
+#include "tsTsTstf.hpp"
 
 #include <cmath>
-#include <iostream>
-#include <stdexcept>
 #include <string>
 #include <vector>
+
+using namespace MT;
 
 // <<<s_start(tests)
 // --- tensor tests
