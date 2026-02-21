@@ -153,7 +153,7 @@ auto CTensor::Clone() const -> CTensor {
     std::memcpy(tOut.m_lStride, m_lStride, sizeof(m_lStride));
 
     tOut.m_pData = std::malloc(m_iDataSize);
-    assert(tOut.m_pData && "Clone: malloc failed");
+    assert(tOut.m_pData && "[ct:clone] malloc failed");
     std::memcpy(tOut.m_pData, m_pData, m_iDataSize);
     return tOut;
 }
