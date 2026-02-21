@@ -634,9 +634,11 @@ TEST(bench_alloc_medium) {
 
 TEST(bench_clone) {
     auto t = CTensor::Rand({256, 256});
+    volatile float kys;
+
     Bench("clone 256x256", 5000, [&]() {
         auto tC = t.Clone();
-        (void)tC;
+        kys = tC.fFlat(0);
     });
 }
 
@@ -665,11 +667,13 @@ TEST(bench_rand) {
 
 TEST(bench_flat_access) {
     auto t = CTensor::Rand({1024, 1024});
+    volatile float kys;
+
     Bench("flat read 1M", 100, [&]() {
         float fSum = 0.0f;
         for (int64_t i = 0; i < t.lNumel(); i++)
             fSum += t.fFlat(i);
-        (void)fSum;
+        kys = fSum;
     });
 }
 // >>>s_end(benches)
