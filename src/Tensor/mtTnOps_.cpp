@@ -41,10 +41,10 @@ static auto tElementwise(const CTensor &tA, const CTensor &tB, BinaryFn pfnOp) -
     assert(tA.bIsContiguous() && tB.bIsContiguous());
 
     CTensor tOut = tLike(tA);
-    const float *pfA = tA.pfData();
-    const float *pfB = tB.pfData();
-    float *pfO = tOut.pfData();
-    int64_t lN = tA.lNumel();
+    const float *__restrict__ pfA = tA.pfData();
+    const float *__restrict__ pfB = tB.pfData();
+    float *__restrict__ pfO = tOut.pfData();
+    const int64_t lN = tA.lNumel();
 
     for (int64_t i = 0; i < lN; i++) {
         pfO[i] = pfnOp(pfA[i], pfB[i]);
@@ -63,9 +63,9 @@ using UnaryFn = float (*)(float);
 static auto tUnarywise(const CTensor &tA, UnaryFn pfnOp) -> CTensor {
     assert(tA.m_eType == EType::F32 && tA.bIsContiguous());
     CTensor tOut = tLike(tA);
-    const float *pfA = tA.pfData();
-    float *pfO = tOut.pfData();
-    int64_t lN = tA.lNumel();
+    const float *__restrict__ pfA = tA.pfData();
+    float *__restrict__ pfO = tOut.pfData();
+    const int64_t lN = tA.lNumel();
     for (int64_t i = 0; i < lN; i++) {
         pfO[i] = pfnOp(pfA[i]);
     }
@@ -115,8 +115,21 @@ static void BroadcastShapes(const CTensor &tA, const CTensor &tB, int64_t *viOut
  * PARMS: tA (first), tB (second), pfnOp (operation)
  * AUTH: Rajendra (14.02.26)
  *-------------------------------------------------------*/
+
 static auto tBroadcastOp(const CTensor &tA, const CTensor &tB, BinaryFn pfnOp) -> CTensor {
     assert(tA.m_eType == EType::F32 && tB.m_eType == EType::F32);
+    if (tA.m_iNdim == tB.m_iNdim && tA.bIsContiguous() && tB.bIsContiguous()) {
+        bool bSameShape = true;
+        for (int i = 0; i < tA.m_iNdim; i++) {
+            if (tA.m_lShape[i] != tB.m_lShape[i]) {
+                bSameShape = false;
+                break;
+            }
+        }
+        if (bSameShape) {
+            return tElementwise(tA, tB, pfnOp);
+        }
+    }
 
     int64_t lOutShape[mmDims];
     int64_t lStrideA[mmDims], lStrideB[mmDims];
@@ -126,27 +139,95 @@ static auto tBroadcastOp(const CTensor &tA, const CTensor &tB, BinaryFn pfnOp) -
 
     CTensor tOut(std::vector<int64_t>(lOutShape, lOutShape + iOutNdim));
 
-    const float *pfA = tA.pfData();
-    const float *pfB = tB.pfData();
-    float *pfO = tOut.pfData();
+    const float *__restrict__ pfA = tA.pfData();
+    const float *__restrict__ pfB = tB.pfData();
+    float *__restrict__ pfO = tOut.pfData();
 
-    int64_t lN = tOut.lNumel();
-    std::vector<int64_t> vlIdx(iOutNdim, 0);
+    const int64_t lN = tOut.lNumel();
 
-    for (int64_t flat = 0; flat < lN; flat++) {
+    int64_t lSuffix[mmDims];
+    lSuffix[iOutNdim - 1] = 1;
+    for (int d = iOutNdim - 2; d >= 0; d--) {
+        lSuffix[d] = lSuffix[d + 1] * lOutShape[d + 1];
+    }
+
+    const int iLastDim = iOutNdim - 1;
+    const int64_t lInnerSize = lOutShape[iLastDim];
+    const bool bInnerContiguous = (lStrideA[iLastDim] != 0) && (lStrideB[iLastDim] != 0);
+    const bool bInnerBcastA = (lStrideA[iLastDim] == 0);
+    const bool bInnerBcastB = (lStrideB[iLastDim] == 0);
+
+    if (iOutNdim == 1) {
+        const int64_t lSA = lStrideA[0];
+        const int64_t lSB = lStrideB[0];
+        for (int64_t i = 0; i < lN; i++) {
+            pfO[i] = pfnOp(pfA[i * lSA], pfB[i * lSB]);
+        }
+        return tOut;
+    }
+
+    const int64_t lOuterN = lN / lInnerSize;
+
+    for (int64_t outer = 0; outer < lOuterN; outer++) {
         int64_t lOffA = 0, lOffB = 0;
-        for (int d = 0; d < iOutNdim; d++) {
-            lOffA += vlIdx[d] * lStrideA[d];
-            lOffB += vlIdx[d] * lStrideB[d];
+        int64_t lTmp = outer;
+        for (int d = 0; d < iLastDim; d++) {
+            int64_t lSuffixD = lSuffix[d] / lInnerSize;
+            int64_t lIdx = lTmp / lSuffixD;
+            lTmp %= lSuffixD;
+            lOffA += lIdx * lStrideA[d];
+            lOffB += lIdx * lStrideB[d];
         }
 
-        pfO[flat] = pfnOp(pfA[lOffA], pfB[lOffB]);
+        float *__restrict__ pfORow = pfO + outer * lInnerSize;
 
-        for (int d = iOutNdim - 1; d >= 0; d--) {
-            vlIdx[d]++;
-            if (vlIdx[d] < lOutShape[d])
-                break;
-            vlIdx[d] = 0;
+        if (bInnerContiguous) {
+            const float *__restrict__ pfAR = pfA + lOffA;
+            const float *__restrict__ pfBR = pfB + lOffB;
+            const int64_t lSA = lStrideA[iLastDim];
+            const int64_t lSB = lStrideB[iLastDim];
+            if (lSA == 1 && lSB == 1) {
+                for (int64_t i = 0; i < lInnerSize; i++) {
+                    pfORow[i] = pfnOp(pfAR[i], pfBR[i]);
+                }
+            } else {
+                for (int64_t i = 0; i < lInnerSize; i++) {
+                    pfORow[i] = pfnOp(pfAR[i * lSA], pfBR[i * lSB]);
+                }
+            }
+        } else if (bInnerBcastA) {
+            const float fAVal = pfA[lOffA];
+            const float *__restrict__ pfBR = pfB + lOffB;
+            const int64_t lSB = lStrideB[iLastDim];
+            if (lSB == 1) {
+                for (int64_t i = 0; i < lInnerSize; i++) {
+                    pfORow[i] = pfnOp(fAVal, pfBR[i]);
+                }
+            } else {
+                for (int64_t i = 0; i < lInnerSize; i++) {
+                    pfORow[i] = pfnOp(fAVal, pfBR[i * lSB]);
+                }
+            }
+        } else if (bInnerBcastB) {
+            const float *__restrict__ pfAR = pfA + lOffA;
+            const float fBVal = pfB[lOffB];
+            const int64_t lSA = lStrideA[iLastDim];
+            if (lSA == 1) {
+                for (int64_t i = 0; i < lInnerSize; i++) {
+                    pfORow[i] = pfnOp(pfAR[i], fBVal);
+                }
+            } else {
+                for (int64_t i = 0; i < lInnerSize; i++) {
+                    pfORow[i] = pfnOp(pfAR[i * lSA], fBVal);
+                }
+            }
+        } else {
+            const float fAVal = pfA[lOffA];
+            const float fBVal = pfB[lOffB];
+            const float fResult = pfnOp(fAVal, fBVal);
+            for (int64_t i = 0; i < lInnerSize; i++) {
+                pfORow[i] = fResult;
+            }
         }
     }
 
@@ -252,9 +333,9 @@ auto DivBroadcast(const CTensor &tA, const CTensor &tB) -> CTensor {
 auto AddScalar(const CTensor &tA, float fS) -> CTensor {
     assert(tA.m_eType == EType::F32 && tA.bIsContiguous());
     CTensor tOut = tLike(tA);
-    const float *pfA = tA.pfData();
-    float *pfO = tOut.pfData();
-    int64_t lN = tA.lNumel();
+    const float *__restrict__ pfA = tA.pfData();
+    float *__restrict__ pfO = tOut.pfData();
+    const int64_t lN = tA.lNumel();
     for (int64_t i = 0; i < lN; i++)
         pfO[i] = pfA[i] + fS;
     return tOut;
@@ -269,9 +350,9 @@ auto AddScalar(const CTensor &tA, float fS) -> CTensor {
 auto MulScalar(const CTensor &tA, float fS) -> CTensor {
     assert(tA.m_eType == EType::F32 && tA.bIsContiguous());
     CTensor tOut = tLike(tA);
-    const float *pfA = tA.pfData();
-    float *pfO = tOut.pfData();
-    int64_t lN = tA.lNumel();
+    const float *__restrict__ pfA = tA.pfData();
+    float *__restrict__ pfO = tOut.pfData();
+    const int64_t lN = tA.lNumel();
     for (int64_t i = 0; i < lN; i++)
         pfO[i] = pfA[i] * fS;
     return tOut;
@@ -293,20 +374,22 @@ auto Matmul(const CTensor &tA, const CTensor &tB) -> CTensor {
     assert(tA.m_lShape[1] == tB.m_lShape[0] && "[op:matmul] matmul dimension mismatch");
     assert(tA.bIsContiguous() && tB.bIsContiguous());
 
-    int64_t lM = tA.m_lShape[0];
-    int64_t lK = tA.m_lShape[1];
-    int64_t lN = tB.m_lShape[1];
+    const int64_t lM = tA.m_lShape[0];
+    const int64_t lK = tA.m_lShape[1];
+    const int64_t lN = tB.m_lShape[1];
 
     CTensor tOut = CTensor::Zeros({lM, lN});
-    const float *pfA = tA.pfData();
-    const float *pfB = tB.pfData();
-    float *pfO = tOut.pfData();
+    const float *__restrict__ pfA = tA.pfData();
+    const float *__restrict__ pfB = tB.pfData();
+    float *__restrict__ pfO = tOut.pfData();
 
     for (int64_t i = 0; i < lM; i++) {
+        float *__restrict__ pfORow = pfO + i * lN;
         for (int64_t k = 0; k < lK; k++) {
-            float fAik = pfA[i * lK + k];
+            const float fAik = pfA[i * lK + k];
+            const float *__restrict__ pfBRow = pfB + k * lN;
             for (int64_t j = 0; j < lN; j++) {
-                pfO[i * lN + j] += fAik * pfB[k * lN + j];
+                pfORow[j] += fAik * pfBRow[j];
             }
         }
     }
@@ -328,26 +411,28 @@ auto Bmm(const CTensor &tA, const CTensor &tB) -> CTensor {
     assert(tA.m_lShape[2] == tB.m_lShape[1] && "[op:bmm] bmm inner dimension mismatch");
     assert(tA.bIsContiguous() && tB.bIsContiguous());
 
-    int64_t lB = tA.m_lShape[0];
-    int64_t lM = tA.m_lShape[1];
-    int64_t lK = tA.m_lShape[2];
-    int64_t lN = tB.m_lShape[2];
+    const int64_t lB = tA.m_lShape[0];
+    const int64_t lM = tA.m_lShape[1];
+    const int64_t lK = tA.m_lShape[2];
+    const int64_t lN = tB.m_lShape[2];
 
     CTensor tOut = CTensor::Zeros({lB, lM, lN});
-    const float *pfA = tA.pfData();
-    const float *pfB = tB.pfData();
-    float *pfO = tOut.pfData();
+    const float *__restrict__ pfA = tA.pfData();
+    const float *__restrict__ pfB = tB.pfData();
+    float *__restrict__ pfO = tOut.pfData();
 
     for (int64_t b = 0; b < lB; b++) {
-        const float *pfBa = pfA + b * lM * lK;
-        const float *pfBb = pfB + b * lK * lN;
-        float *pfBo = pfO + b * lM * lN;
+        const float *__restrict__ pfBa = pfA + b * lM * lK;
+        const float *__restrict__ pfBb = pfB + b * lK * lN;
+        float *__restrict__ pfBo = pfO + b * lM * lN;
 
         for (int64_t i = 0; i < lM; i++) {
+            float *__restrict__ pfORow = pfBo + i * lN;
             for (int64_t k = 0; k < lK; k++) {
-                float fAik = pfBa[i * lK + k];
+                const float fAik = pfBa[i * lK + k];
+                const float *__restrict__ pfBRow = pfBb + k * lN;
                 for (int64_t j = 0; j < lN; j++) {
-                    pfBo[i * lN + j] += fAik * pfBb[k * lN + j];
+                    pfORow[j] += fAik * pfBRow[j];
                 }
             }
         }
@@ -360,7 +445,6 @@ auto Bmm(const CTensor &tA, const CTensor &tB) -> CTensor {
  * FN: Matvec
  * DESC: matrix-vector multiply
  *       [i.e., (m, k) x (k) -> (m)]
- *        TODO: this can be faster with ilp black magic.
  * PARMS: tMat (matrix), tVec (vector)
  * AUTH: unium (13.02.26)
  *-------------------------------------------------------*/
@@ -370,18 +454,28 @@ auto Matvec(const CTensor &tMat, const CTensor &tVec) -> CTensor {
     assert(tMat.m_lShape[1] == tVec.m_lShape[0] && "[op:matvec] matvec dimension mismatch");
     assert(tMat.bIsContiguous() && tVec.bIsContiguous());
 
-    int64_t lM = tMat.m_lShape[0];
-    int64_t lK = tMat.m_lShape[1];
+    const int64_t lM = tMat.m_lShape[0];
+    const int64_t lK = tMat.m_lShape[1];
 
     CTensor tOut = CTensor::Zeros({lM});
-    const float *pfMat = tMat.pfData();
-    const float *pfVec = tVec.pfData();
-    float *pfO = tOut.pfData();
+    const float *__restrict__ pfMat = tMat.pfData();
+    const float *__restrict__ pfVec = tVec.pfData();
+    float *__restrict__ pfO = tOut.pfData();
 
+    // yay ilp magic
     for (int64_t i = 0; i < lM; i++) {
-        float fSum = 0.0f;
-        const float *pfRow = pfMat + i * lK;
-        for (int64_t k = 0; k < lK; k++) {
+        const float *__restrict__ pfRow = pfMat + i * lK;
+        float fSum0 = 0.0f, fSum1 = 0.0f, fSum2 = 0.0f, fSum3 = 0.0f;
+        int64_t k = 0;
+        const int64_t lK4 = lK - (lK % 4);
+        for (; k < lK4; k += 4) {
+            fSum0 += pfRow[k] * pfVec[k];
+            fSum1 += pfRow[k + 1] * pfVec[k + 1];
+            fSum2 += pfRow[k + 2] * pfVec[k + 2];
+            fSum3 += pfRow[k + 3] * pfVec[k + 3];
+        }
+        float fSum = fSum0 + fSum1 + fSum2 + fSum3;
+        for (; k < lK; k++) {
             fSum += pfRow[k] * pfVec[k];
         }
         pfO[i] = fSum;
@@ -404,9 +498,20 @@ auto Sum(const CTensor &tA, int iDim) -> CTensor {
 
     if (iDim == -1) {
         CTensor tOut({1});
-        float fSum = 0.0f;
-        const float *pfA = tA.pfData();
-        for (int64_t i = 0; i < tA.lNumel(); i++)
+        const float *__restrict__ pfA = tA.pfData();
+        const int64_t lN = tA.lNumel();
+        // more ilp magic!!!
+        float fSum0 = 0.0f, fSum1 = 0.0f, fSum2 = 0.0f, fSum3 = 0.0f;
+        int64_t i = 0;
+        const int64_t lN4 = lN - (lN % 4);
+        for (; i < lN4; i += 4) {
+            fSum0 += pfA[i];
+            fSum1 += pfA[i + 1];
+            fSum2 += pfA[i + 2];
+            fSum3 += pfA[i + 3];
+        }
+        float fSum = fSum0 + fSum1 + fSum2 + fSum3;
+        for (; i < lN; i++)
             fSum += pfA[i];
         tOut.pfData()[0] = fSum;
         return tOut;
@@ -429,15 +534,30 @@ auto Sum(const CTensor &tA, int iDim) -> CTensor {
         lOuter *= tA.m_lShape[i];
     for (int i = iDim + 1; i < tA.m_iNdim; i++)
         lInner *= tA.m_lShape[i];
-    int64_t lDimSize = tA.m_lShape[iDim];
+    const int64_t lDimSize = tA.m_lShape[iDim];
 
-    const float *pfA = tA.pfData();
-    float *pfO = tOut.pfData();
+    const float *__restrict__ pfA = tA.pfData();
+    float *__restrict__ pfO = tOut.pfData();
 
-    for (int64_t o = 0; o < lOuter; o++) {
-        for (int64_t d = 0; d < lDimSize; d++) {
-            for (int64_t in = 0; in < lInner; in++) {
-                pfO[o * lInner + in] += pfA[(o * lDimSize + d) * lInner + in];
+    if (lInner == 1) {
+        // reduc last dim or cont inner=1
+        // sum along cont run
+        for (int64_t o = 0; o < lOuter; o++) {
+            const float *__restrict__ pfRow = pfA + o * lDimSize;
+            float fSum = 0.0f;
+            for (int64_t d = 0; d < lDimSize; d++) {
+                fSum += pfRow[d];
+            }
+            pfO[o] = fSum;
+        }
+    } else {
+        for (int64_t o = 0; o < lOuter; o++) {
+            float *__restrict__ pfORow = pfO + o * lInner;
+            for (int64_t d = 0; d < lDimSize; d++) {
+                const float *__restrict__ pfSrc = pfA + (o * lDimSize + d) * lInner;
+                for (int64_t in = 0; in < lInner; in++) {
+                    pfORow[in] += pfSrc[in];
+                }
             }
         }
     }
@@ -471,9 +591,10 @@ auto Max(const CTensor &tA, int iDim) -> CTensor {
 
     if (iDim == -1) {
         CTensor tOut({1});
-        const float *pfA = tA.pfData();
+        const float *__restrict__ pfA = tA.pfData();
+        const int64_t lN = tA.lNumel();
         float fMax = pfA[0];
-        for (int64_t i = 1; i < tA.lNumel(); i++) {
+        for (int64_t i = 1; i < lN; i++) {
             if (pfA[i] > fMax)
                 fMax = pfA[i];
         }
@@ -498,20 +619,33 @@ auto Max(const CTensor &tA, int iDim) -> CTensor {
         lOuter *= tA.m_lShape[i];
     for (int i = iDim + 1; i < tA.m_iNdim; i++)
         lInner *= tA.m_lShape[i];
-    int64_t lDimSize = tA.m_lShape[iDim];
+    const int64_t lDimSize = tA.m_lShape[iDim];
 
-    const float *pfA = tA.pfData();
-    float *pfO = tOut.pfData();
+    const float *__restrict__ pfA = tA.pfData();
+    float *__restrict__ pfO = tOut.pfData();
 
-    for (int64_t o = 0; o < lOuter; o++) {
-        for (int64_t in = 0; in < lInner; in++) {
-            float fMax = pfA[(o * lDimSize + 0) * lInner + in];
+    if (lInner == 1) {
+        for (int64_t o = 0; o < lOuter; o++) {
+            const float *__restrict__ pfRow = pfA + o * lDimSize;
+            float fMax = pfRow[0];
             for (int64_t d = 1; d < lDimSize; d++) {
-                float fVal = pfA[(o * lDimSize + d) * lInner + in];
-                if (fVal > fMax)
-                    fMax = fVal;
+                if (pfRow[d] > fMax)
+                    fMax = pfRow[d];
             }
-            pfO[o * lInner + in] = fMax;
+            pfO[o] = fMax;
+        }
+    } else {
+        for (int64_t o = 0; o < lOuter; o++) {
+            float *__restrict__ pfORow = pfO + o * lInner;
+            const float *__restrict__ pfFirst = pfA + o * lDimSize * lInner;
+            std::memcpy(pfORow, pfFirst, lInner * sizeof(float));
+            for (int64_t d = 1; d < lDimSize; d++) {
+                const float *__restrict__ pfSrc = pfA + (o * lDimSize + d) * lInner;
+                for (int64_t in = 0; in < lInner; in++) {
+                    if (pfSrc[in] > pfORow[in])
+                        pfORow[in] = pfSrc[in];
+                }
+            }
         }
     }
 
@@ -638,31 +772,57 @@ auto Softmax(const CTensor &tA, int iDim) -> CTensor {
         lOuter *= tA.m_lShape[i];
     for (int i = iDim + 1; i < tA.m_iNdim; i++)
         lInner *= tA.m_lShape[i];
-    int64_t lDimSize = tA.m_lShape[iDim];
+    const int64_t lDimSize = tA.m_lShape[iDim];
 
-    const float *pfA = tA.pfData();
-    float *pfO = tOut.pfData();
+    const float *__restrict__ pfA = tA.pfData();
+    float *__restrict__ pfO = tOut.pfData();
 
-    for (int64_t o = 0; o < lOuter; o++) {
-        for (int64_t in = 0; in < lInner; in++) {
-            float fMax = pfA[(o * lDimSize + 0) * lInner + in];
+    if (lInner == 1) {
+        for (int64_t o = 0; o < lOuter; o++) {
+            const float *__restrict__ pfRow = pfA + o * lDimSize;
+            float *__restrict__ pfORow = pfO + o * lDimSize;
+
+            float fMax = pfRow[0];
             for (int64_t d = 1; d < lDimSize; d++) {
-                float fV = pfA[(o * lDimSize + d) * lInner + in];
-                if (fV > fMax)
-                    fMax = fV;
+                if (pfRow[d] > fMax)
+                    fMax = pfRow[d];
             }
 
             float fSumExp = 0.0f;
             for (int64_t d = 0; d < lDimSize; d++) {
-                int64_t lIdx = (o * lDimSize + d) * lInner + in;
-                float fE = std::exp(pfA[lIdx] - fMax);
-                pfO[lIdx] = fE;
+                float fE = std::exp(pfRow[d] - fMax);
+                pfORow[d] = fE;
                 fSumExp += fE;
             }
 
+            const float fInvSum = 1.0f / fSumExp;
             for (int64_t d = 0; d < lDimSize; d++) {
-                int64_t lIdx = (o * lDimSize + d) * lInner + in;
-                pfO[lIdx] /= fSumExp;
+                pfORow[d] *= fInvSum;
+            }
+        }
+    } else {
+        for (int64_t o = 0; o < lOuter; o++) {
+            for (int64_t in = 0; in < lInner; in++) {
+                float fMax = pfA[(o * lDimSize + 0) * lInner + in];
+                for (int64_t d = 1; d < lDimSize; d++) {
+                    float fV = pfA[(o * lDimSize + d) * lInner + in];
+                    if (fV > fMax)
+                        fMax = fV;
+                }
+
+                float fSumExp = 0.0f;
+                for (int64_t d = 0; d < lDimSize; d++) {
+                    int64_t lIdx = (o * lDimSize + d) * lInner + in;
+                    float fE = std::exp(pfA[lIdx] - fMax);
+                    pfO[lIdx] = fE;
+                    fSumExp += fE;
+                }
+
+                const float fInvSum = 1.0f / fSumExp;
+                for (int64_t d = 0; d < lDimSize; d++) {
+                    int64_t lIdx = (o * lDimSize + d) * lInner + in;
+                    pfO[lIdx] *= fInvSum;
+                }
             }
         }
     }
@@ -684,27 +844,38 @@ auto RmsNorm(const CTensor &tX, const CTensor &tW, float fEps) -> CTensor {
     assert(tX.bIsContiguous() && tW.bIsContiguous());
     assert(tW.m_iNdim == 1);
 
-    int64_t lNormDim = tX.m_lShape[tX.m_iNdim - 1];
+    const int64_t lNormDim = tX.m_lShape[tX.m_iNdim - 1];
     assert(tW.m_lShape[0] == lNormDim);
 
     CTensor tOut = tLike(tX);
-    const float *pfX = tX.pfData();
-    const float *pfW = tW.pfData();
-    float *pfO = tOut.pfData();
+    const float *__restrict__ pfX = tX.pfData();
+    const float *__restrict__ pfW = tW.pfData();
+    float *__restrict__ pfO = tOut.pfData();
 
-    int64_t lRows = tX.lNumel() / lNormDim;
+    const int64_t lRows = tX.lNumel() / lNormDim;
+    const float fInvDim = 1.0f / (float)lNormDim;
 
     for (int64_t r = 0; r < lRows; r++) {
-        const float *pfRow = pfX + r * lNormDim;
-        float *pfOutRow = pfO + r * lNormDim;
+        const float *__restrict__ pfRow = pfX + r * lNormDim;
+        float *__restrict__ pfOutRow = pfO + r * lNormDim;
 
-        float fSS = 0.0f;
-        for (int64_t i = 0; i < lNormDim; i++) {
+        float fSS0 = 0.0f, fSS1 = 0.0f, fSS2 = 0.0f, fSS3 = 0.0f;
+        int64_t i = 0;
+        const int64_t lN4 = lNormDim - (lNormDim % 4);
+        for (; i < lN4; i += 4) {
+            fSS0 += pfRow[i] * pfRow[i];
+            fSS1 += pfRow[i + 1] * pfRow[i + 1];
+            fSS2 += pfRow[i + 2] * pfRow[i + 2];
+            fSS3 += pfRow[i + 3] * pfRow[i + 3];
+        }
+        float fSS = fSS0 + fSS1 + fSS2 + fSS3;
+        for (; i < lNormDim; i++) {
             fSS += pfRow[i] * pfRow[i];
         }
-        float fRms = 1.0f / std::sqrt(fSS / (float)lNormDim + fEps);
 
-        for (int64_t i = 0; i < lNormDim; i++) {
+        const float fRms = 1.0f / std::sqrt(fSS * fInvDim + fEps);
+
+        for (i = 0; i < lNormDim; i++) {
             pfOutRow[i] = pfRow[i] * fRms * pfW[i];
         }
     }
@@ -813,10 +984,21 @@ auto fDot(const CTensor &tA, const CTensor &tB) -> float {
     assert(tA.m_eType == EType::F32 && tB.m_eType == EType::F32);
     assert(tA.bIsContiguous() && tB.bIsContiguous());
 
-    const float *pfA = tA.pfData();
-    const float *pfB = tB.pfData();
-    float fSum = 0.0f;
-    for (int64_t i = 0; i < tA.m_lShape[0]; i++) {
+    const float *__restrict__ pfA = tA.pfData();
+    const float *__restrict__ pfB = tB.pfData();
+    const int64_t lN = tA.m_lShape[0];
+
+    float fSum0 = 0.0f, fSum1 = 0.0f, fSum2 = 0.0f, fSum3 = 0.0f;
+    int64_t i = 0;
+    const int64_t lN4 = lN - (lN % 4);
+    for (; i < lN4; i += 4) {
+        fSum0 += pfA[i] * pfB[i];
+        fSum1 += pfA[i + 1] * pfB[i + 1];
+        fSum2 += pfA[i + 2] * pfB[i + 2];
+        fSum3 += pfA[i + 3] * pfB[i + 3];
+    }
+    float fSum = fSum0 + fSum1 + fSum2 + fSum3;
+    for (; i < lN; i++) {
         fSum += pfA[i] * pfB[i];
     }
     return fSum;
@@ -957,7 +1139,7 @@ auto Concat(const std::vector<const CTensor *> &vtTensors, int iDim) -> CTensor 
     }
 
     CTensor tOut(vlOutShape);
-    float *pfO = tOut.pfData();
+    float *__restrict__ pfO = tOut.pfData();
 
     int64_t lOuter = 1;
     for (int i = 0; i < iDim; i++)
@@ -966,17 +1148,27 @@ auto Concat(const std::vector<const CTensor *> &vtTensors, int iDim) -> CTensor 
     for (int i = iDim + 1; i < tFirst.m_iNdim; i++)
         lInner *= tFirst.m_lShape[i];
 
-    int64_t lOutConcatDim = lConcatSize;
+    const int64_t lOutConcatDim = lConcatSize;
+    std::vector<int64_t> vlColOff(vtTensors.size());
+
+    // <<<ignore(allman)
+    {
+        int64_t lOff = 0;
+        for (size_t t = 0; t < vtTensors.size(); t++) {
+            vlColOff[t] = lOff;
+            lOff += vtTensors[t]->m_lShape[iDim];
+        }
+    }
+    // >>>ignore
 
     for (int64_t o = 0; o < lOuter; o++) {
-        int64_t lColOff = 0;
-        for (auto *ptT : vtTensors) {
-            int64_t lThisDim = ptT->m_lShape[iDim];
-            int64_t lChunkSize = lThisDim * lInner;
-            const float *pfSrc = ptT->pfData() + o * lChunkSize;
-            float *pfDst = pfO + o * lOutConcatDim * lInner + lColOff * lInner;
+        for (size_t t = 0; t < vtTensors.size(); t++) {
+            const CTensor *ptT = vtTensors[t];
+            const int64_t lThisDim = ptT->m_lShape[iDim];
+            const int64_t lChunkSize = lThisDim * lInner;
+            const float *__restrict__ pfSrc = ptT->pfData() + o * lChunkSize;
+            float *__restrict__ pfDst = pfO + o * lOutConcatDim * lInner + vlColOff[t] * lInner;
             std::memcpy(pfDst, pfSrc, lChunkSize * sizeof(float));
-            lColOff += lThisDim;
         }
     }
 
@@ -1095,11 +1287,11 @@ void CopyInto(CTensor &tDst, const CTensor &tSrc, int64_t lRowOffset) {
     assert(lRowOffset >= 0);
     assert(lRowOffset + tSrc.m_lShape[0] <= tDst.m_lShape[0] && "[op:copyinto] out of bounds");
 
-    int64_t lRowSize = tSrc.lNumel() / tSrc.m_lShape[0];
-    int64_t lBytes = tSrc.lNumel() * sizeof(float);
+    const int64_t lRowSize = tSrc.lNumel() / tSrc.m_lShape[0];
+    const int64_t lBytes = tSrc.lNumel() * sizeof(float);
 
-    float *pfDst = tDst.pfData() + lRowOffset * lRowSize;
-    const float *pfSrc = tSrc.pfData();
+    float *__restrict__ pfDst = tDst.pfData() + lRowOffset * lRowSize;
+    const float *__restrict__ pfSrc = tSrc.pfData();
 
     std::memcpy(pfDst, pfSrc, lBytes);
 }

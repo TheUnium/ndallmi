@@ -119,7 +119,6 @@ auto Bmm(const CTensor &tA, const CTensor &tB) -> CTensor;
  * FN: Matvec
  * DESC: matrix-vector multiply
  *       [i.e., (m, k) x (k) -> (m)]
- *        TODO: this can be faster with ilp black magic.
  * PARMS: tMat (matrix), tVec (vector)
  * AUTH: unium (13.02.26)
  *-------------------------------------------------------*/
