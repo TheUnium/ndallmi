@@ -273,18 +273,27 @@ auto CTensor::Rand(const std::vector<int64_t> &vlShape, EType eType) -> CTensor 
     int64_t i = 0;
 
     for (; i + 3 < lN; i += 4) {
+        // i fucking hate you strict allioasiiigngifhkdjsagbhfkljhewagkljhsahdkljgfvhszdkljfhklzdjshahfljhkdsahui
         uint32_t r0 = s_rng();
         uint32_t r1 = s_rng();
         uint32_t r2 = s_rng();
         uint32_t r3 = s_rng();
-        pU32[i + 0] = (r0 >> 9) | 0x3F800000u;
-        pU32[i + 1] = (r1 >> 9) | 0x3F800000u;
-        pU32[i + 2] = (r2 >> 9) | 0x3F800000u;
-        pU32[i + 3] = (r3 >> 9) | 0x3F800000u;
-        pfPtr[i + 0] -= 1.0f;
-        pfPtr[i + 1] -= 1.0f;
-        pfPtr[i + 2] -= 1.0f;
-        pfPtr[i + 3] -= 1.0f;
+
+        uint32_t u0 = (r0 >> 9) | 0x3F800000u;
+        uint32_t u1 = (r1 >> 9) | 0x3F800000u;
+        uint32_t u2 = (r2 >> 9) | 0x3F800000u;
+        uint32_t u3 = (r3 >> 9) | 0x3F800000u;
+
+        float f0, f1, f2, f3;
+        std::memcpy(&f0, &u0, 4);
+        std::memcpy(&f1, &u1, 4);
+        std::memcpy(&f2, &u2, 4);
+        std::memcpy(&f3, &u3, 4);
+
+        pfPtr[i + 0] = f0 - 1.0f;
+        pfPtr[i + 1] = f1 - 1.0f;
+        pfPtr[i + 2] = f2 - 1.0f;
+        pfPtr[i + 3] = f3 - 1.0f;
     }
     for (; i < lN; i++) {
         uint32_t r = s_rng();
