@@ -154,6 +154,12 @@ static inline auto fHsumAvx(__m256 v) -> float {
 static void KernelAdd(const float *pfA, const float *pfB, float *pfO, int64_t lStart, int64_t lEnd) {
     int64_t i = lStart;
 #if MT_X86 && defined(__AVX2__)
+    for (; i + 32 <= lEnd; i += 32) {
+        _mm256_storeu_ps(pfO + i, _mm256_add_ps(_mm256_loadu_ps(pfA + i), _mm256_loadu_ps(pfB + i)));
+        _mm256_storeu_ps(pfO + i + 8, _mm256_add_ps(_mm256_loadu_ps(pfA + i + 8), _mm256_loadu_ps(pfB + i + 8)));
+        _mm256_storeu_ps(pfO + i + 16, _mm256_add_ps(_mm256_loadu_ps(pfA + i + 16), _mm256_loadu_ps(pfB + i + 16)));
+        _mm256_storeu_ps(pfO + i + 24, _mm256_add_ps(_mm256_loadu_ps(pfA + i + 24), _mm256_loadu_ps(pfB + i + 24)));
+    }
     for (; i + 8 <= lEnd; i += 8) {
         _mm256_storeu_ps(pfO + i, _mm256_add_ps(_mm256_loadu_ps(pfA + i), _mm256_loadu_ps(pfB + i)));
     }
@@ -171,6 +177,12 @@ static void KernelAdd(const float *pfA, const float *pfB, float *pfO, int64_t lS
 static void KernelSub(const float *pfA, const float *pfB, float *pfO, int64_t lStart, int64_t lEnd) {
     int64_t i = lStart;
 #if MT_X86 && defined(__AVX2__)
+    for (; i + 32 <= lEnd; i += 32) {
+        _mm256_storeu_ps(pfO + i, _mm256_sub_ps(_mm256_loadu_ps(pfA + i), _mm256_loadu_ps(pfB + i)));
+        _mm256_storeu_ps(pfO + i + 8, _mm256_sub_ps(_mm256_loadu_ps(pfA + i + 8), _mm256_loadu_ps(pfB + i + 8)));
+        _mm256_storeu_ps(pfO + i + 16, _mm256_sub_ps(_mm256_loadu_ps(pfA + i + 16), _mm256_loadu_ps(pfB + i + 16)));
+        _mm256_storeu_ps(pfO + i + 24, _mm256_sub_ps(_mm256_loadu_ps(pfA + i + 24), _mm256_loadu_ps(pfB + i + 24)));
+    }
     for (; i + 8 <= lEnd; i += 8) {
         _mm256_storeu_ps(pfO + i, _mm256_sub_ps(_mm256_loadu_ps(pfA + i), _mm256_loadu_ps(pfB + i)));
     }
@@ -188,6 +200,12 @@ static void KernelSub(const float *pfA, const float *pfB, float *pfO, int64_t lS
 static void KernelMul(const float *pfA, const float *pfB, float *pfO, int64_t lStart, int64_t lEnd) {
     int64_t i = lStart;
 #if MT_X86 && defined(__AVX2__)
+    for (; i + 32 <= lEnd; i += 32) {
+        _mm256_storeu_ps(pfO + i, _mm256_mul_ps(_mm256_loadu_ps(pfA + i), _mm256_loadu_ps(pfB + i)));
+        _mm256_storeu_ps(pfO + i + 8, _mm256_mul_ps(_mm256_loadu_ps(pfA + i + 8), _mm256_loadu_ps(pfB + i + 8)));
+        _mm256_storeu_ps(pfO + i + 16, _mm256_mul_ps(_mm256_loadu_ps(pfA + i + 16), _mm256_loadu_ps(pfB + i + 16)));
+        _mm256_storeu_ps(pfO + i + 24, _mm256_mul_ps(_mm256_loadu_ps(pfA + i + 24), _mm256_loadu_ps(pfB + i + 24)));
+    }
     for (; i + 8 <= lEnd; i += 8) {
         _mm256_storeu_ps(pfO + i, _mm256_mul_ps(_mm256_loadu_ps(pfA + i), _mm256_loadu_ps(pfB + i)));
     }
@@ -244,7 +262,8 @@ static auto KernelDot(const float *pfA, const float *pfB, int64_t lStart, int64_
  *-------------------------------------------------------*/
 static void KernelMatmulBlock(const float *pfA, const float *pfB, float *pfC, int64_t lK, int64_t lN, int64_t lRowStart,
                               int64_t lRowEnd) {
-    constexpr int64_t TILE_K = 128;
+    constexpr int64_t TILE_K = 256;
+    constexpr int64_t TILE_N = 128;
     constexpr int64_t MICRO_M = 6;
 
     for (int64_t i = lRowStart; i < lRowEnd; i++) {
@@ -256,111 +275,107 @@ static void KernelMatmulBlock(const float *pfA, const float *pfB, float *pfC, in
     for (int64_t kk = 0; kk < lK; kk += TILE_K) {
         int64_t lKEnd = std::min(kk + TILE_K, lK);
 
-        // process rows in groups of MICRO_M for register reuse
-        int64_t ii = lRowStart;
-        for (; ii + MICRO_M <= lRowEnd; ii += MICRO_M) {
-            // for this group of MICRO_M rows, sweep across columns
-            int64_t jj = 0;
+        for (int64_t jjj = 0; jjj < lN; jjj += TILE_N) {
+            int64_t lNEnd = std::min(jjj + TILE_N, lN);
+
+            int64_t ii = lRowStart;
+            for (; ii + MICRO_M <= lRowEnd; ii += MICRO_M) {
+                int64_t jj = jjj;
 
 #if MT_X86 && defined(__AVX2__)
-            // 16-wide column blocks
-            for (; jj + 16 <= lN; jj += 16) {
-                // load MICRO_M rows x 2 avx regs of accumulators
-                __m256 vC[MICRO_M][2];
-                for (int mi = 0; mi < MICRO_M; mi++) {
-                    vC[mi][0] = _mm256_loadu_ps(pfC + (ii + mi) * lN + jj);
-                    vC[mi][1] = _mm256_loadu_ps(pfC + (ii + mi) * lN + jj + 8);
-                }
+                for (; jj + 16 <= lNEnd; jj += 16) {
+                    __m256 vC[MICRO_M][2];
+                    for (int mi = 0; mi < MICRO_M; mi++) {
+                        vC[mi][0] = _mm256_loadu_ps(pfC + (ii + mi) * lN + jj);
+                        vC[mi][1] = _mm256_loadu_ps(pfC + (ii + mi) * lN + jj + 8);
+                    }
 
-                for (int64_t k = kk; k < lKEnd; k++) {
-                    // load B row once, reuse across all MICRO_M rows
-                    __m256 vB0 = _mm256_loadu_ps(pfB + k * lN + jj);
-                    __m256 vB1 = _mm256_loadu_ps(pfB + k * lN + jj + 8);
+                    for (int64_t k = kk; k < lKEnd; k++) {
+                        __m256 vB0 = _mm256_loadu_ps(pfB + k * lN + jj);
+                        __m256 vB1 = _mm256_loadu_ps(pfB + k * lN + jj + 8);
+
+                        for (int mi = 0; mi < MICRO_M; mi++) {
+                            __m256 vA = _mm256_set1_ps(pfA[(ii + mi) * lK + k]);
+                            vC[mi][0] = _mm256_fmadd_ps(vA, vB0, vC[mi][0]);
+                            vC[mi][1] = _mm256_fmadd_ps(vA, vB1, vC[mi][1]);
+                        }
+                    }
 
                     for (int mi = 0; mi < MICRO_M; mi++) {
-                        __m256 vA = _mm256_set1_ps(pfA[(ii + mi) * lK + k]);
-                        vC[mi][0] = _mm256_fmadd_ps(vA, vB0, vC[mi][0]);
-                        vC[mi][1] = _mm256_fmadd_ps(vA, vB1, vC[mi][1]);
+                        _mm256_storeu_ps(pfC + (ii + mi) * lN + jj, vC[mi][0]);
+                        _mm256_storeu_ps(pfC + (ii + mi) * lN + jj + 8, vC[mi][1]);
                     }
                 }
 
-                for (int mi = 0; mi < MICRO_M; mi++) {
-                    _mm256_storeu_ps(pfC + (ii + mi) * lN + jj, vC[mi][0]);
-                    _mm256_storeu_ps(pfC + (ii + mi) * lN + jj + 8, vC[mi][1]);
-                }
-            }
-
-            // 8-wide column blocks
-            for (; jj + 8 <= lN; jj += 8) {
-                __m256 vC[MICRO_M];
-                for (int mi = 0; mi < MICRO_M; mi++) {
-                    vC[mi] = _mm256_loadu_ps(pfC + (ii + mi) * lN + jj);
-                }
-
-                for (int64_t k = kk; k < lKEnd; k++) {
-                    __m256 vB0 = _mm256_loadu_ps(pfB + k * lN + jj);
+                for (; jj + 8 <= lNEnd; jj += 8) {
+                    __m256 vC[MICRO_M];
                     for (int mi = 0; mi < MICRO_M; mi++) {
-                        __m256 vA = _mm256_set1_ps(pfA[(ii + mi) * lK + k]);
-                        vC[mi] = _mm256_fmadd_ps(vA, vB0, vC[mi]);
+                        vC[mi] = _mm256_loadu_ps(pfC + (ii + mi) * lN + jj);
+                    }
+
+                    for (int64_t k = kk; k < lKEnd; k++) {
+                        __m256 vB0 = _mm256_loadu_ps(pfB + k * lN + jj);
+                        for (int mi = 0; mi < MICRO_M; mi++) {
+                            __m256 vA = _mm256_set1_ps(pfA[(ii + mi) * lK + k]);
+                            vC[mi] = _mm256_fmadd_ps(vA, vB0, vC[mi]);
+                        }
+                    }
+
+                    for (int mi = 0; mi < MICRO_M; mi++) {
+                        _mm256_storeu_ps(pfC + (ii + mi) * lN + jj, vC[mi]);
                     }
                 }
-
-                for (int mi = 0; mi < MICRO_M; mi++) {
-                    _mm256_storeu_ps(pfC + (ii + mi) * lN + jj, vC[mi]);
-                }
-            }
 #endif
 
-            // scalar tail for remaining columns
-            if (jj < lN) {
-                for (int mi = 0; mi < MICRO_M; mi++) {
-                    for (int64_t k = kk; k < lKEnd; k++) {
-                        float fA = pfA[(ii + mi) * lK + k];
-                        for (int64_t j = jj; j < lN; j++) {
-                            pfC[(ii + mi) * lN + j] += fA * pfB[k * lN + j];
+                if (jj < lNEnd) {
+                    for (int mi = 0; mi < MICRO_M; mi++) {
+                        for (int64_t k = kk; k < lKEnd; k++) {
+                            float fA = pfA[(ii + mi) * lK + k];
+                            for (int64_t j = jj; j < lNEnd; j++) {
+                                pfC[(ii + mi) * lN + j] += fA * pfB[k * lN + j];
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // leftover rows that don't fill a full MICRO_M group
-        for (; ii < lRowEnd; ii++) {
-            int64_t jj = 0;
+            for (; ii < lRowEnd; ii++) {
+                int64_t jj = jjj;
 
 #if MT_X86 && defined(__AVX2__)
-            for (; jj + 16 <= lN; jj += 16) {
-                __m256 vC0 = _mm256_loadu_ps(pfC + ii * lN + jj);
-                __m256 vC1 = _mm256_loadu_ps(pfC + ii * lN + jj + 8);
+                for (; jj + 16 <= lNEnd; jj += 16) {
+                    __m256 vC0 = _mm256_loadu_ps(pfC + ii * lN + jj);
+                    __m256 vC1 = _mm256_loadu_ps(pfC + ii * lN + jj + 8);
 
-                for (int64_t k = kk; k < lKEnd; k++) {
-                    __m256 vA = _mm256_set1_ps(pfA[ii * lK + k]);
-                    vC0 = _mm256_fmadd_ps(vA, _mm256_loadu_ps(pfB + k * lN + jj), vC0);
-                    vC1 = _mm256_fmadd_ps(vA, _mm256_loadu_ps(pfB + k * lN + jj + 8), vC1);
+                    for (int64_t k = kk; k < lKEnd; k++) {
+                        __m256 vA = _mm256_set1_ps(pfA[ii * lK + k]);
+                        vC0 = _mm256_fmadd_ps(vA, _mm256_loadu_ps(pfB + k * lN + jj), vC0);
+                        vC1 = _mm256_fmadd_ps(vA, _mm256_loadu_ps(pfB + k * lN + jj + 8), vC1);
+                    }
+
+                    _mm256_storeu_ps(pfC + ii * lN + jj, vC0);
+                    _mm256_storeu_ps(pfC + ii * lN + jj + 8, vC1);
                 }
 
-                _mm256_storeu_ps(pfC + ii * lN + jj, vC0);
-                _mm256_storeu_ps(pfC + ii * lN + jj + 8, vC1);
-            }
+                for (; jj + 8 <= lNEnd; jj += 8) {
+                    __m256 vC0 = _mm256_loadu_ps(pfC + ii * lN + jj);
 
-            for (; jj + 8 <= lN; jj += 8) {
-                __m256 vC0 = _mm256_loadu_ps(pfC + ii * lN + jj);
+                    for (int64_t k = kk; k < lKEnd; k++) {
+                        __m256 vA = _mm256_set1_ps(pfA[ii * lK + k]);
+                        vC0 = _mm256_fmadd_ps(vA, _mm256_loadu_ps(pfB + k * lN + jj), vC0);
+                    }
 
-                for (int64_t k = kk; k < lKEnd; k++) {
-                    __m256 vA = _mm256_set1_ps(pfA[ii * lK + k]);
-                    vC0 = _mm256_fmadd_ps(vA, _mm256_loadu_ps(pfB + k * lN + jj), vC0);
+                    _mm256_storeu_ps(pfC + ii * lN + jj, vC0);
                 }
-
-                _mm256_storeu_ps(pfC + ii * lN + jj, vC0);
-            }
 #endif
 
-            for (; jj < lN; jj++) {
-                float fSum = pfC[ii * lN + jj];
-                for (int64_t k = kk; k < lKEnd; k++) {
-                    fSum += pfA[ii * lK + k] * pfB[k * lN + jj];
+                for (; jj < lNEnd; jj++) {
+                    float fSum = pfC[ii * lN + jj];
+                    for (int64_t k = kk; k < lKEnd; k++) {
+                        fSum += pfA[ii * lK + k] * pfB[k * lN + jj];
+                    }
+                    pfC[ii * lN + jj] = fSum;
                 }
-                pfC[ii * lN + jj] = fSum;
             }
         }
     }
@@ -375,8 +390,142 @@ static void KernelMatmulBlock(const float *pfA, const float *pfB, float *pfC, in
  *-------------------------------------------------------*/
 static void KernelMatvecRows(const float *pfM, const float *pfV, float *pfO, int64_t lK, int64_t lRowStart,
                              int64_t lRowEnd) {
-    for (int64_t i = lRowStart; i < lRowEnd; i++) {
-        pfO[i] = KernelDot(pfM + i * lK, pfV, 0, lK);
+    // tile over kdim so the vec tile stays in l1/l2 cache so the mat
+    // can stream into the cpu fast as fuck
+    constexpr int64_t TILE_K = 512;
+
+    for (int64_t i = lRowStart; i < lRowEnd; i++)
+        pfO[i] = 0.0f;
+
+    for (int64_t kk = 0; kk < lK; kk += TILE_K) {
+        int64_t lKEnd = std::min(kk + TILE_K, lK);
+        int64_t lKBlock = lKEnd - kk;
+        const float *pfVTile = pfV + kk;
+
+        int64_t i = lRowStart;
+
+#if MT_X86 && defined(__AVX2__)
+        // 8r at a time to max in flight memreqs, each r reads the same vec tile from l1
+        // diff mat rows from drom
+        // 8 independent acc chains keep the cpu busy during cache misses bc cpus are lazy pieces of shits
+        for (; i + 8 <= lRowEnd; i += 8) {
+            const float *pfR0 = pfM + (i)*lK + kk;
+            const float *pfR1 = pfM + (i + 1) * lK + kk;
+            const float *pfR2 = pfM + (i + 2) * lK + kk;
+            const float *pfR3 = pfM + (i + 3) * lK + kk;
+            const float *pfR4 = pfM + (i + 4) * lK + kk;
+            const float *pfR5 = pfM + (i + 5) * lK + kk;
+            const float *pfR6 = pfM + (i + 6) * lK + kk;
+            const float *pfR7 = pfM + (i + 7) * lK + kk;
+
+            __m256 vAcc0 = _mm256_setzero_ps();
+            __m256 vAcc1 = _mm256_setzero_ps();
+            __m256 vAcc2 = _mm256_setzero_ps();
+            __m256 vAcc3 = _mm256_setzero_ps();
+            __m256 vAcc4 = _mm256_setzero_ps();
+            __m256 vAcc5 = _mm256_setzero_ps();
+            __m256 vAcc6 = _mm256_setzero_ps();
+            __m256 vAcc7 = _mm256_setzero_ps();
+
+            int64_t k = 0;
+            for (; k + 8 <= lKBlock; k += 8) {
+                __m256 vV = _mm256_loadu_ps(pfVTile + k);
+                vAcc0 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR0 + k), vV, vAcc0);
+                vAcc1 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR1 + k), vV, vAcc1);
+                vAcc2 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR2 + k), vV, vAcc2);
+                vAcc3 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR3 + k), vV, vAcc3);
+                vAcc4 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR4 + k), vV, vAcc4);
+                vAcc5 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR5 + k), vV, vAcc5);
+                vAcc6 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR6 + k), vV, vAcc6);
+                vAcc7 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR7 + k), vV, vAcc7);
+            }
+
+            float f0 = fHsumAvx(vAcc0);
+            float f1 = fHsumAvx(vAcc1);
+            float f2 = fHsumAvx(vAcc2);
+            float f3 = fHsumAvx(vAcc3);
+            float f4 = fHsumAvx(vAcc4);
+            float f5 = fHsumAvx(vAcc5);
+            float f6 = fHsumAvx(vAcc6);
+            float f7 = fHsumAvx(vAcc7);
+
+            for (; k < lKBlock; k++) {
+                float fV = pfVTile[k];
+                f0 += pfR0[k] * fV;
+                f1 += pfR1[k] * fV;
+                f2 += pfR2[k] * fV;
+                f3 += pfR3[k] * fV;
+                f4 += pfR4[k] * fV;
+                f5 += pfR5[k] * fV;
+                f6 += pfR6[k] * fV;
+                f7 += pfR7[k] * fV;
+            }
+
+            pfO[i] += f0;
+            pfO[i + 1] += f1;
+            pfO[i + 2] += f2;
+            pfO[i + 3] += f3;
+            pfO[i + 4] += f4;
+            pfO[i + 5] += f5;
+            pfO[i + 6] += f6;
+            pfO[i + 7] += f7;
+        }
+
+        for (; i + 4 <= lRowEnd; i += 4) {
+            const float *pfR0 = pfM + (i)*lK + kk;
+            const float *pfR1 = pfM + (i + 1) * lK + kk;
+            const float *pfR2 = pfM + (i + 2) * lK + kk;
+            const float *pfR3 = pfM + (i + 3) * lK + kk;
+
+            __m256 vAcc0 = _mm256_setzero_ps();
+            __m256 vAcc1 = _mm256_setzero_ps();
+            __m256 vAcc2 = _mm256_setzero_ps();
+            __m256 vAcc3 = _mm256_setzero_ps();
+
+            int64_t k = 0;
+            for (; k + 8 <= lKBlock; k += 8) {
+                __m256 vV = _mm256_loadu_ps(pfVTile + k);
+                vAcc0 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR0 + k), vV, vAcc0);
+                vAcc1 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR1 + k), vV, vAcc1);
+                vAcc2 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR2 + k), vV, vAcc2);
+                vAcc3 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR3 + k), vV, vAcc3);
+            }
+
+            float f0 = fHsumAvx(vAcc0);
+            float f1 = fHsumAvx(vAcc1);
+            float f2 = fHsumAvx(vAcc2);
+            float f3 = fHsumAvx(vAcc3);
+
+            for (; k < lKBlock; k++) {
+                float fV = pfVTile[k];
+                f0 += pfR0[k] * fV;
+                f1 += pfR1[k] * fV;
+                f2 += pfR2[k] * fV;
+                f3 += pfR3[k] * fV;
+            }
+
+            pfO[i] += f0;
+            pfO[i + 1] += f1;
+            pfO[i + 2] += f2;
+            pfO[i + 3] += f3;
+        }
+#endif
+
+        // scalar remainder rows
+        for (; i < lRowEnd; i++) {
+            const float *pfRow = pfM + i * lK + kk;
+            float fS = 0.0f;
+            int64_t k = 0;
+#if MT_X86 && defined(__AVX2__)
+            __m256 vAcc = _mm256_setzero_ps();
+            for (; k + 8 <= lKBlock; k += 8)
+                vAcc = _mm256_fmadd_ps(_mm256_loadu_ps(pfRow + k), _mm256_loadu_ps(pfVTile + k), vAcc);
+            fS = fHsumAvx(vAcc);
+#endif
+            for (; k < lKBlock; k++)
+                fS += pfRow[k] * pfVTile[k];
+            pfO[i] += fS;
+        }
     }
 }
 // >>>s_end(mmk)
@@ -386,7 +535,8 @@ static void KernelMatvecRows(const float *pfM, const float *pfV, float *pfO, int
 // --- element wise opers
 /*---------------------------------------------------------
  * FN: Add
- * DESC: performs element wise addition of two tensors
+ * DESC: [DEPRECATED] performs element wise addition of two
+ *       tensors. naive add is ~same. check benchmarks.
  * PARMS: tA (first tensor), tB (second tensor)
  * AUTH: unium (22.02.26)
  *-------------------------------------------------------*/
@@ -401,8 +551,13 @@ auto Add(const CTensor &tA, const CTensor &tB) -> CTensor {
     const float *pfA = tA.pfData();
     const float *pfB = tB.pfData();
     float *pfO = tOut.pfData();
+    int64_t lN = tA.lNumel();
 
-    TH::ParFor(tA.lNumel(), [&](int64_t s, int64_t e) { KernelAdd(pfA, pfB, pfO, s, e); });
+    if (lN < 500000) {
+        KernelAdd(pfA, pfB, pfO, 0, lN);
+    } else {
+        TH::ParFor(lN, [&](int64_t s, int64_t e) { KernelAdd(pfA, pfB, pfO, s, e); });
+    }
     return tOut;
 }
 
@@ -423,14 +578,20 @@ auto Sub(const CTensor &tA, const CTensor &tB) -> CTensor {
     const float *pfA = tA.pfData();
     const float *pfB = tB.pfData();
     float *pfO = tOut.pfData();
+    int64_t lN = tA.lNumel();
 
-    TH::ParFor(tA.lNumel(), [&](int64_t s, int64_t e) { KernelSub(pfA, pfB, pfO, s, e); });
+    if (lN < 500000) {
+        KernelSub(pfA, pfB, pfO, 0, lN);
+    } else {
+        TH::ParFor(lN, [&](int64_t s, int64_t e) { KernelSub(pfA, pfB, pfO, s, e); });
+    }
     return tOut;
 }
 
 /*---------------------------------------------------------
  * FN: Mul
- * DESC: performs element wise multiplication of two tensors
+ * DESC: [DEPRECATED] performs element wise multiplication
+ *       of two tensors. naive mul is ~same. check benchmarks.
  * PARMS: tA (first tensor), tB (second tensor)
  * AUTH: unium (22.02.26)
  *-------------------------------------------------------*/
@@ -445,8 +606,13 @@ auto Mul(const CTensor &tA, const CTensor &tB) -> CTensor {
     const float *pfA = tA.pfData();
     const float *pfB = tB.pfData();
     float *pfO = tOut.pfData();
+    int64_t lN = tA.lNumel();
 
-    TH::ParFor(tA.lNumel(), [&](int64_t s, int64_t e) { KernelMul(pfA, pfB, pfO, s, e); });
+    if (lN < 500000) {
+        KernelMul(pfA, pfB, pfO, 0, lN);
+    } else {
+        TH::ParFor(lN, [&](int64_t s, int64_t e) { KernelMul(pfA, pfB, pfO, s, e); });
+    }
     return tOut;
 }
 
@@ -461,17 +627,30 @@ auto AddScalar(const CTensor &tA, float fS) -> CTensor {
     CTensor tOut = tLike(tA);
     const float *pfA = tA.pfData();
     float *pfO = tOut.pfData();
+    int64_t lN = tA.lNumel();
 
-    TH::ParFor(tA.lNumel(), [&](int64_t lStart, int64_t lEnd) {
+    auto fnKernel = [&](int64_t lStart, int64_t lEnd) {
         int64_t i = lStart;
 #if MT_X86 && defined(__AVX2__)
         __m256 vS = _mm256_set1_ps(fS);
+        for (; i + 32 <= lEnd; i += 32) {
+            _mm256_storeu_ps(pfO + i, _mm256_add_ps(_mm256_loadu_ps(pfA + i), vS));
+            _mm256_storeu_ps(pfO + i + 8, _mm256_add_ps(_mm256_loadu_ps(pfA + i + 8), vS));
+            _mm256_storeu_ps(pfO + i + 16, _mm256_add_ps(_mm256_loadu_ps(pfA + i + 16), vS));
+            _mm256_storeu_ps(pfO + i + 24, _mm256_add_ps(_mm256_loadu_ps(pfA + i + 24), vS));
+        }
         for (; i + 8 <= lEnd; i += 8)
             _mm256_storeu_ps(pfO + i, _mm256_add_ps(_mm256_loadu_ps(pfA + i), vS));
 #endif
         for (; i < lEnd; i++)
             pfO[i] = pfA[i] + fS;
-    });
+    };
+
+    if (lN < 500000) {
+        fnKernel(0, lN);
+    } else {
+        TH::ParFor(lN, fnKernel);
+    }
     return tOut;
 }
 
@@ -486,17 +665,30 @@ auto MulScalar(const CTensor &tA, float fS) -> CTensor {
     CTensor tOut = tLike(tA);
     const float *pfA = tA.pfData();
     float *pfO = tOut.pfData();
+    int64_t lN = tA.lNumel();
 
-    TH::ParFor(tA.lNumel(), [&](int64_t lStart, int64_t lEnd) {
+    auto fnKernel = [&](int64_t lStart, int64_t lEnd) {
         int64_t i = lStart;
 #if MT_X86 && defined(__AVX2__)
         __m256 vS = _mm256_set1_ps(fS);
+        for (; i + 32 <= lEnd; i += 32) {
+            _mm256_storeu_ps(pfO + i, _mm256_mul_ps(_mm256_loadu_ps(pfA + i), vS));
+            _mm256_storeu_ps(pfO + i + 8, _mm256_mul_ps(_mm256_loadu_ps(pfA + i + 8), vS));
+            _mm256_storeu_ps(pfO + i + 16, _mm256_mul_ps(_mm256_loadu_ps(pfA + i + 16), vS));
+            _mm256_storeu_ps(pfO + i + 24, _mm256_mul_ps(_mm256_loadu_ps(pfA + i + 24), vS));
+        }
         for (; i + 8 <= lEnd; i += 8)
             _mm256_storeu_ps(pfO + i, _mm256_mul_ps(_mm256_loadu_ps(pfA + i), vS));
 #endif
         for (; i < lEnd; i++)
             pfO[i] = pfA[i] * fS;
-    });
+    };
+
+    if (lN < 500000) {
+        fnKernel(0, lN);
+    } else {
+        TH::ParFor(lN, fnKernel);
+    }
     return tOut;
 }
 // >>>s_end(element)
@@ -524,19 +716,13 @@ auto Matmul(const CTensor &tA, const CTensor &tB) -> CTensor {
     const float *pfB = tB.pfData();
     float *pfO = tOut.pfData();
 
-    // for matmul, parallelize over rows directly
-    // each thread gets a contiguous block of rows and runs
-    // the full tiled micro-kernel on them
     int iThreads = TH::GetGlobalPool().iNumThreads();
-    int iActualThreads = std::min((int64_t)iThreads, lM);
+    int64_t lWorkSize = lM * lN * lK;
+    int iActualThreads = (lWorkSize < 100000 || lM < 4) ? 1 : std::min((int64_t)iThreads, lM);
 
-    if (iActualThreads <= 1 || lM < 4) {
-        // single-thread: just run the kernel
+    if (iActualThreads <= 1) {
         KernelMatmulBlock(pfA, pfB, pfO, lK, lN, 0, lM);
     } else {
-        // split rows evenly across threads
-        // use raw thread distribution, not ParFor, because
-        // ParFor's threshold logic is for element counts
         int64_t lChunk = (lM + iActualThreads - 1) / iActualThreads;
 
         TH::GetGlobalPool().ParallelFor(iActualThreads, [&](int64_t lThreadStart, int64_t lThreadEnd) {
@@ -570,7 +756,35 @@ auto Matvec(const CTensor &tMat, const CTensor &tVec) -> CTensor {
     const float *pfM = tMat.pfData();
     const float *pfV = tVec.pfData();
     float *pfO = tOut.pfData();
-    TH::ParFor(lM, [&](int64_t s, int64_t e) { KernelMatvecRows(pfM, pfV, pfO, lK, s, e); });
+
+    int64_t lMatBytes = lM * lK * (int64_t)sizeof(float);
+    int iActualThreads = 1;
+
+    if (lMatBytes > 4 * 1024 * 1024) {
+        // cap at 4 threads bc dual channel ddr4 saturates around 2-3 cores
+        int iThreads = TH::GetGlobalPool().iNumThreads();
+        iActualThreads = std::min(4, iThreads);
+        iActualThreads = (int)std::min((int64_t)iActualThreads, lM / 64);
+        if (iActualThreads < 1)
+            iActualThreads = 1;
+    }
+
+    if (iActualThreads <= 1) {
+        KernelMatvecRows(pfM, pfV, pfO, lK, 0, lM);
+    } else {
+        int64_t lChunk = (lM + iActualThreads - 1) / iActualThreads;
+        lChunk = ((lChunk + 7) / 8) * 8;
+
+        TH::GetGlobalPool().ParallelFor(iActualThreads, [&](int64_t lThreadStart, int64_t lThreadEnd) {
+            for (int64_t t = lThreadStart; t < lThreadEnd; t++) {
+                int64_t lRowStart = t * lChunk;
+                int64_t lRowEnd = std::min(lRowStart + lChunk, lM);
+                if (lRowStart < lRowEnd) {
+                    KernelMatvecRows(pfM, pfV, pfO, lK, lRowStart, lRowEnd);
+                }
+            }
+        });
+    }
     return tOut;
 }
 // >>>s_end(matrix)
@@ -593,10 +807,12 @@ auto fDot(const CTensor &tA, const CTensor &tB) -> float {
     const float *pfB = tB.pfData();
     int64_t lN = tA.m_lShape[0];
 
-    // cache-line padded partial sums to avoid false sharing
+    if (lN < 500000) {
+        return KernelDot(pfA, pfB, 0, lN);
+    }
+
     int iThreads = TH::GetGlobalPool().iNumThreads();
-    // pad each slot to 64 bytes (cache line)
-    std::vector<float> vfPartial(iThreads * 16, 0.0f);
+    std::vector<float> vfPartial(iThreads * 16, 0.0f); // cl
 
     TH::ParFor(lN, [&](int64_t lStart, int64_t lEnd) {
         int64_t lChunk = (lN + iThreads - 1) / iThreads;
@@ -624,6 +840,29 @@ auto fSum(const CTensor &tA) -> float {
     const float *pfA = tA.pfData();
     int64_t lN = tA.lNumel();
 
+    auto fnSumRange = [&](int64_t lStart, int64_t lEnd) -> float {
+        float fS = 0.0f;
+        int64_t i = lStart;
+#if MT_X86 && defined(__AVX2__)
+        __m256 vAcc0 = _mm256_setzero_ps();
+        __m256 vAcc1 = _mm256_setzero_ps();
+        for (; i + 16 <= lEnd; i += 16) {
+            vAcc0 = _mm256_add_ps(vAcc0, _mm256_loadu_ps(pfA + i));
+            vAcc1 = _mm256_add_ps(vAcc1, _mm256_loadu_ps(pfA + i + 8));
+        }
+        for (; i + 8 <= lEnd; i += 8)
+            vAcc0 = _mm256_add_ps(vAcc0, _mm256_loadu_ps(pfA + i));
+        fS = fHsumAvx(_mm256_add_ps(vAcc0, vAcc1));
+#endif
+        for (; i < lEnd; i++)
+            fS += pfA[i];
+        return fS;
+    };
+
+    if (lN < 500000) {
+        return fnSumRange(0, lN);
+    }
+
     int iThreads = TH::GetGlobalPool().iNumThreads();
     std::vector<float> vfPartial(iThreads * 16, 0.0f);
 
@@ -632,18 +871,7 @@ auto fSum(const CTensor &tA) -> float {
         int iThread = (lChunk > 0) ? (int)(lStart / lChunk) : 0;
         if (iThread >= iThreads)
             iThread = iThreads - 1;
-
-        float fS = 0.0f;
-        int64_t i = lStart;
-#if MT_X86 && defined(__AVX2__)
-        __m256 vAcc = _mm256_setzero_ps();
-        for (; i + 8 <= lEnd; i += 8)
-            vAcc = _mm256_add_ps(vAcc, _mm256_loadu_ps(pfA + i));
-        fS = fHsumAvx(vAcc);
-#endif
-        for (; i < lEnd; i++)
-            fS += pfA[i];
-        vfPartial[iThread * 16] = fS;
+        vfPartial[iThread * 16] = fnSumRange(lStart, lEnd);
     });
 
     float fTotal = 0.0f;
@@ -666,17 +894,30 @@ auto Relu(const CTensor &tA) -> CTensor {
     CTensor tOut = tLike(tA);
     const float *pfA = tA.pfData();
     float *pfO = tOut.pfData();
+    int64_t lN = tA.lNumel();
 
-    TH::ParFor(tA.lNumel(), [&](int64_t lStart, int64_t lEnd) {
+    auto fnKernel = [&](int64_t lStart, int64_t lEnd) {
         int64_t i = lStart;
 #if MT_X86 && defined(__AVX2__)
         __m256 vZero = _mm256_setzero_ps();
+        for (; i + 32 <= lEnd; i += 32) {
+            _mm256_storeu_ps(pfO + i, _mm256_max_ps(_mm256_loadu_ps(pfA + i), vZero));
+            _mm256_storeu_ps(pfO + i + 8, _mm256_max_ps(_mm256_loadu_ps(pfA + i + 8), vZero));
+            _mm256_storeu_ps(pfO + i + 16, _mm256_max_ps(_mm256_loadu_ps(pfA + i + 16), vZero));
+            _mm256_storeu_ps(pfO + i + 24, _mm256_max_ps(_mm256_loadu_ps(pfA + i + 24), vZero));
+        }
         for (; i + 8 <= lEnd; i += 8)
             _mm256_storeu_ps(pfO + i, _mm256_max_ps(_mm256_loadu_ps(pfA + i), vZero));
 #endif
         for (; i < lEnd; i++)
             pfO[i] = pfA[i] > 0.0f ? pfA[i] : 0.0f;
-    });
+    };
+
+    if (lN < 500000) {
+        fnKernel(0, lN);
+    } else {
+        TH::ParFor(lN, fnKernel);
+    }
     return tOut;
 }
 
@@ -691,8 +932,9 @@ auto Silu(const CTensor &tA) -> CTensor {
     CTensor tOut = tLike(tA);
     const float *pfA = tA.pfData();
     float *pfO = tOut.pfData();
+    int64_t lN = tA.lNumel();
 
-    TH::ParFor(tA.lNumel(), [&](int64_t lStart, int64_t lEnd) {
+    auto fnKernel = [&](int64_t lStart, int64_t lEnd) {
         int64_t i = lStart;
 #if MT_X86 && defined(__AVX2__)
         __m256 vOne = _mm256_set1_ps(1.0f);
@@ -712,7 +954,13 @@ auto Silu(const CTensor &tA) -> CTensor {
 #endif
         for (; i < lEnd; i++)
             pfO[i] = pfA[i] / (1.0f + std::exp(-pfA[i]));
-    });
+    };
+
+    if (lN < 500000) {
+        fnKernel(0, lN);
+    } else {
+        TH::ParFor(lN, fnKernel);
+    }
     return tOut;
 }
 // >>>s_end(activations)
@@ -739,7 +987,7 @@ auto RmsNorm(const CTensor &tX, const CTensor &tW, float fEps) -> CTensor {
     float *pfO = tOut.pfData();
     int64_t lRows = tX.lNumel() / lNormDim;
 
-    TH::ParFor(lRows, [&](int64_t lStart, int64_t lEnd) {
+    auto fnProcessRows = [&](int64_t lStart, int64_t lEnd) {
         for (int64_t r = lStart; r < lEnd; r++) {
             const float *pfRow = pfX + r * lNormDim;
             float *pfOutRow = pfO + r * lNormDim;
@@ -768,6 +1016,12 @@ auto RmsNorm(const CTensor &tX, const CTensor &tW, float fEps) -> CTensor {
             j = 0;
 #if MT_X86 && defined(__AVX2__)
             __m256 vScale = _mm256_set1_ps(fScale);
+            for (; j + 16 <= lNormDim; j += 16) {
+                _mm256_storeu_ps(pfOutRow + j, _mm256_mul_ps(_mm256_mul_ps(_mm256_loadu_ps(pfRow + j), vScale),
+                                                             _mm256_loadu_ps(pfW + j)));
+                _mm256_storeu_ps(pfOutRow + j + 8, _mm256_mul_ps(_mm256_mul_ps(_mm256_loadu_ps(pfRow + j + 8), vScale),
+                                                                 _mm256_loadu_ps(pfW + j + 8)));
+            }
             for (; j + 8 <= lNormDim; j += 8) {
                 _mm256_storeu_ps(pfOutRow + j, _mm256_mul_ps(_mm256_mul_ps(_mm256_loadu_ps(pfRow + j), vScale),
                                                              _mm256_loadu_ps(pfW + j)));
@@ -776,7 +1030,13 @@ auto RmsNorm(const CTensor &tX, const CTensor &tW, float fEps) -> CTensor {
             for (; j < lNormDim; j++)
                 pfOutRow[j] = pfRow[j] * fScale * pfW[j];
         }
-    });
+    };
+
+    if (lRows < 256) {
+        fnProcessRows(0, lRows);
+    } else {
+        TH::ParFor(lRows, fnProcessRows);
+    }
     return tOut;
 }
 
@@ -797,11 +1057,12 @@ auto Softmax(const CTensor &tA) -> CTensor {
     int64_t lDimSize = tA.m_lShape[tA.m_iNdim - 1];
     int64_t lRows = tA.lNumel() / lDimSize;
 
-    TH::ParFor(lRows, [&](int64_t lStart, int64_t lEnd) {
+    auto fnProcessRows = [&](int64_t lStart, int64_t lEnd) {
         for (int64_t r = lStart; r < lEnd; r++) {
             const float *pfRow = pfA + r * lDimSize;
             float *pfOutRow = pfO + r * lDimSize;
 
+            // find max
             float fMax = pfRow[0];
             int64_t j = 1;
 #if MT_X86 && defined(__AVX2__)
@@ -822,24 +1083,57 @@ auto Softmax(const CTensor &tA) -> CTensor {
                 if (pfRow[j] > fMax)
                     fMax = pfRow[j];
 
+            // exp and sum
             float fSumExp = 0.0f;
-            for (j = 0; j < lDimSize; j++) {
+            j = 0;
+#if MT_X86 && defined(__AVX2__)
+            {
+                __m256 vMax256 = _mm256_set1_ps(fMax);
+                __m256 vExpA = _mm256_set1_ps(12102203.2f);
+                __m256 vExpB = _mm256_set1_ps(1064866805.0f);
+                __m256 vClampLo = _mm256_set1_ps(-80.0f);
+                __m256 vClampHi = _mm256_set1_ps(80.0f);
+                __m256 vSumAcc = _mm256_setzero_ps();
+
+                for (; j + 8 <= lDimSize; j += 8) {
+                    __m256 vX = _mm256_sub_ps(_mm256_loadu_ps(pfRow + j), vMax256);
+                    vX = _mm256_max_ps(vX, vClampLo);
+                    vX = _mm256_min_ps(vX, vClampHi);
+                    __m256 vE = _mm256_castsi256_ps(_mm256_cvtps_epi32(_mm256_add_ps(_mm256_mul_ps(vX, vExpA), vExpB)));
+                    _mm256_storeu_ps(pfOutRow + j, vE);
+                    vSumAcc = _mm256_add_ps(vSumAcc, vE);
+                }
+                fSumExp = fHsumAvx(vSumAcc);
+            }
+#endif
+            for (; j < lDimSize; j++) {
                 float fE = std::exp(pfRow[j] - fMax);
                 pfOutRow[j] = fE;
                 fSumExp += fE;
             }
 
+            // normalize
             j = 0;
             float fInvSum = 1.0f / fSumExp;
 #if MT_X86 && defined(__AVX2__)
             __m256 vInvSum = _mm256_set1_ps(fInvSum);
+            for (; j + 16 <= lDimSize; j += 16) {
+                _mm256_storeu_ps(pfOutRow + j, _mm256_mul_ps(_mm256_loadu_ps(pfOutRow + j), vInvSum));
+                _mm256_storeu_ps(pfOutRow + j + 8, _mm256_mul_ps(_mm256_loadu_ps(pfOutRow + j + 8), vInvSum));
+            }
             for (; j + 8 <= lDimSize; j += 8)
                 _mm256_storeu_ps(pfOutRow + j, _mm256_mul_ps(_mm256_loadu_ps(pfOutRow + j), vInvSum));
 #endif
             for (; j < lDimSize; j++)
                 pfOutRow[j] *= fInvSum;
         }
-    });
+    };
+
+    if (lRows < 256) {
+        fnProcessRows(0, lRows);
+    } else {
+        TH::ParFor(lRows, fnProcessRows);
+    }
     return tOut;
 }
 // >>>s_end(normalization)
