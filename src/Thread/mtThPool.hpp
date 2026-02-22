@@ -6,7 +6,6 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
-#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -70,25 +69,23 @@ public:
     auto iNumThreads() const -> int;
 
 private:
-    // <<<s_start(workerd)
-    // --- worker data
-    struct alignas(64) SWorkerData {
-        std::atomic<int64_t> m_lStart{0};
-        std::atomic<int64_t> m_lEnd{0};
-        std::atomic<int> m_iState{0};
-        char m_padding[64 - sizeof(std::atomic<int64_t>) * 2 - sizeof(std::atomic<int>)];
+    struct STask {
+        TaskFn m_lfnWork = nullptr;
+        int64_t m_lStart = 0;
+        int64_t m_lEnd = 0;
     };
-    // >>>s_end(workerd)
 
     std::vector<std::thread> m_vThreads;
-    std::unique_ptr<SWorkerData[]> m_vWorkers;
     int m_iNumThreads = 0;
-    TaskFn m_fnCurrentTask;
 
-    alignas(64) std::atomic<int> m_iDoneCount{0};
+    std::vector<STask> m_vTasks;
     std::mutex m_mtx;
     std::condition_variable m_cvWork;
     std::condition_variable m_cvDone;
+    int m_iActiveThreads = 0;
+    int m_iTasksRemaining = 0;
+    int m_iGeneration = 0;
+    bool m_bShutdown = false;
 
     /*---------------------------------------------------------
      * FN: WorkerLoop

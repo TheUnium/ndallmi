@@ -4,15 +4,6 @@
 
 #include <algorithm>
 
-// <<<s_start(spin)
-// --- spin-wait macro: brief spin with pause
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-#include <immintrin.h>
-#else
-#define _mm_pause() ((void)0)
-#endif
-// >>>s_end(spin)
-
 namespace MT {
 namespace TH {
 /*---------------------------------------------------------
@@ -41,10 +32,11 @@ auto CThreadPool::iNumThreads() const -> int { return m_iNumThreads; }
  * AUTH: unium (22.02.26)
  *-------------------------------------------------------*/
 CThreadPool::CThreadPool(int iNumThreads) {
-    if (iNumThreads <= 0)
+    if (iNumThreads <= 0) {
         iNumThreads = iGetNumCores();
+    }
     m_iNumThreads = iNumThreads;
-    m_vWorkers = std::make_unique<SWorkerData[]>(iNumThreads);
+    m_vTasks.resize(iNumThreads);
     m_vThreads.reserve(iNumThreads);
 
     for (int i = 0; i < iNumThreads; i++) {
@@ -61,9 +53,7 @@ CThreadPool::CThreadPool(int iNumThreads) {
 CThreadPool::~CThreadPool() {
     {
         std::lock_guard<std::mutex> lock(m_mtx);
-        for (int i = 0; i < m_iNumThreads; i++) {
-            m_vWorkers[i].m_iState.store(2, std::memory_order_release);
-        }
+        m_bShutdown = true;
     }
     m_cvWork.notify_all();
     for (auto &t : m_vThreads) {
@@ -92,85 +82,77 @@ void CThreadPool::ParallelFor(int64_t lTotal, TaskFn lfnTask) {
     int iThreadsToUse = std::min(m_iNumThreads, (int)lTotal);
     int64_t lChunk = (lTotal + iThreadsToUse - 1) / iThreadsToUse;
 
-    m_fnCurrentTask = lfnTask;
-    m_iDoneCount.store(0, std::memory_order_relaxed);
-    std::atomic_thread_fence(std::memory_order_release);
-
     {
+        std::lock_guard<std::mutex> lock(m_mtx);
+
+        m_iActiveThreads = iThreadsToUse;
+
         for (int i = 0; i < iThreadsToUse; i++) {
             int64_t lStart = i * lChunk;
             int64_t lEnd = std::min(lStart + lChunk, lTotal);
-            m_vWorkers[i].m_lStart.store(lStart, std::memory_order_relaxed);
-            m_vWorkers[i].m_lEnd.store(lEnd, std::memory_order_relaxed);
-            m_vWorkers[i].m_iState.store(1, std::memory_order_release);
+            m_vTasks[i].m_lfnWork = lfnTask;
+            m_vTasks[i].m_lStart = lStart;
+            m_vTasks[i].m_lEnd = lEnd;
         }
 
-        m_cvWork.notify_all();
+        m_iTasksRemaining = iThreadsToUse;
+        m_iGeneration++;
     }
 
-    int iSpins = 0;
-    while (m_iDoneCount.load(std::memory_order_acquire) < iThreadsToUse) {
-        if (iSpins < 2000) {
-            _mm_pause();
-            iSpins++;
-        } else {
-            std::unique_lock<std::mutex> lock(m_mtx);
-            m_cvDone.wait(lock, [&]() { return m_iDoneCount.load(std::memory_order_acquire) >= iThreadsToUse; });
-        }
+    m_cvWork.notify_all();
+
+    {
+        std::unique_lock<std::mutex> lock(m_mtx);
+        m_cvDone.wait(lock, [&]() { return m_iTasksRemaining == 0; });
     }
 }
 
 /*---------------------------------------------------------
  * FN: WorkerLoop
- * DESC: main loop for each worker thread. uses hybrid
- *       polling (spin -> yield -> sleep) to minimize
- *       latency while preventing cpu starvation.
+ * DESC: main loop for each worker thread
  * PARMS: iThreadId (this threads idx)
  * AUTH: unium (22.02.26)
  *-------------------------------------------------------*/
 void CThreadPool::WorkerLoop(int iThreadId) {
-    SWorkerData &w = m_vWorkers[iThreadId];
+    int iLastGen = 0;
 
     while (true) {
-        int s = w.m_iState.load(std::memory_order_acquire);
-        if (s == 1)
-            goto work;
-        if (s == 2)
-            return;
-
-        for (int sp = 0; sp < 2000; sp++) {
-            _mm_pause();
-            s = w.m_iState.load(std::memory_order_acquire);
-            if (s == 1)
-                goto work;
-            if (s == 2)
-                return;
-        }
+        TaskFn lfnWork;
+        int64_t lStart = 0;
+        int64_t lEnd = 0;
+        bool bParticipate = false;
 
         {
             std::unique_lock<std::mutex> lock(m_mtx);
-            m_cvWork.wait(lock, [&]() {
-                int st = w.m_iState.load(std::memory_order_acquire);
-                return st != 0;
-            });
-            s = w.m_iState.load(std::memory_order_acquire);
+            m_cvWork.wait(lock, [&]() { return m_bShutdown || m_iGeneration != iLastGen; });
+
+            if (m_bShutdown)
+                return;
+
+            iLastGen = m_iGeneration;
+
+            if (iThreadId < m_iActiveThreads) {
+                lfnWork = m_vTasks[iThreadId].m_lfnWork;
+                lStart = m_vTasks[iThreadId].m_lStart;
+                lEnd = m_vTasks[iThreadId].m_lEnd;
+                bParticipate = true;
+            }
         }
 
-        if (s == 2)
-            return;
-    work: {
-        int64_t lStart = w.m_lStart.load(std::memory_order_relaxed);
-        int64_t lEnd = w.m_lEnd.load(std::memory_order_relaxed);
-        if (lStart < lEnd) {
-            m_fnCurrentTask(lStart, lEnd);
+        if (!bParticipate) {
+            continue;
         }
-    }
 
-        w.m_iState.store(0, std::memory_order_release);
-        int iPrev = m_iDoneCount.fetch_add(1, std::memory_order_release);
-        if (iPrev + 1 >= m_iNumThreads) {
+        if (lfnWork && lStart < lEnd) {
+            lfnWork(lStart, lEnd);
+        }
+
+        {
             std::lock_guard<std::mutex> lock(m_mtx);
-            m_cvDone.notify_one();
+            m_iTasksRemaining--;
+            if (m_iTasksRemaining == 0) {
+                m_cvDone.notify_one();
+            }
         }
     }
 }
