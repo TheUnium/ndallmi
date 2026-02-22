@@ -5,6 +5,8 @@
 # obviously don't have. This Makefile is there
 # just so others can build and use this as well.
 #
+# Because of this, this Makefile may be outdated.
+#
 # # Prompt:
 # ---
 # Convert this file into a Makefile:
