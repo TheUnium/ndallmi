@@ -15,6 +15,12 @@ TEST_MODULE("tensor/tensor")
 
 TEST_MODULE("tensor/ops")
 #include "Tests/tsTnOps_.hpp"
+
+TEST_MODULE("tensor/simd")
+#include "Tests/tsTnSimd.hpp"
+
+TEST_MODULE("thread/thread")
+#include "Tests/tsThThrd.hpp"
 // >>>s_end(includes)
 
 // <<<s_start(main)

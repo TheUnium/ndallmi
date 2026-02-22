@@ -1523,4 +1523,13 @@ TEST(bench_matvec_large) {
         (void)tO;
     });
 }
+
+TEST(bench_matvec_ever_larger) {
+    auto tMat = CTensor::Rand({4096, 4096});
+    auto tVec = CTensor::Rand({4096});
+    Bench("matvec 4096x4096", 1000, [&]() {
+        auto tO = OP::Matvec(tMat, tVec);
+        (void)tO;
+    });
+}
 // >>>s_end(benches)
