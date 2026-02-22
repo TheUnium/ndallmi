@@ -388,144 +388,177 @@ static void KernelMatmulBlock(const float *pfA, const float *pfB, float *pfC, in
  * PARMS: pfM, pfV, pfO, lK, lStart, lEnd
  * AUTH: unium (22.02.26)
  *-------------------------------------------------------*/
-static void KernelMatvecRows(const float *pfM, const float *pfV, float *pfO, int64_t lK, int64_t lRowStart,
-                             int64_t lRowEnd) {
-    // tile over kdim so the vec tile stays in l1/l2 cache so the mat
-    // can stream into the cpu fast as fuck
-    constexpr int64_t TILE_K = 512;
-
-    for (int64_t i = lRowStart; i < lRowEnd; i++)
-        pfO[i] = 0.0f;
-
-    for (int64_t kk = 0; kk < lK; kk += TILE_K) {
-        int64_t lKEnd = std::min(kk + TILE_K, lK);
-        int64_t lKBlock = lKEnd - kk;
-        const float *pfVTile = pfV + kk;
-
-        int64_t i = lRowStart;
-
-#if MT_X86 && defined(__AVX2__)
-        // 8r at a time to max in flight memreqs, each r reads the same vec tile from l1
-        // diff mat rows from drom
-        // 8 independent acc chains keep the cpu busy during cache misses bc cpus are lazy pieces of shits
-        for (; i + 8 <= lRowEnd; i += 8) {
-            const float *pfR0 = pfM + (i)*lK + kk;
-            const float *pfR1 = pfM + (i + 1) * lK + kk;
-            const float *pfR2 = pfM + (i + 2) * lK + kk;
-            const float *pfR3 = pfM + (i + 3) * lK + kk;
-            const float *pfR4 = pfM + (i + 4) * lK + kk;
-            const float *pfR5 = pfM + (i + 5) * lK + kk;
-            const float *pfR6 = pfM + (i + 6) * lK + kk;
-            const float *pfR7 = pfM + (i + 7) * lK + kk;
-
-            __m256 vAcc0 = _mm256_setzero_ps();
-            __m256 vAcc1 = _mm256_setzero_ps();
-            __m256 vAcc2 = _mm256_setzero_ps();
-            __m256 vAcc3 = _mm256_setzero_ps();
-            __m256 vAcc4 = _mm256_setzero_ps();
-            __m256 vAcc5 = _mm256_setzero_ps();
-            __m256 vAcc6 = _mm256_setzero_ps();
-            __m256 vAcc7 = _mm256_setzero_ps();
-
-            int64_t k = 0;
-            for (; k + 8 <= lKBlock; k += 8) {
-                __m256 vV = _mm256_loadu_ps(pfVTile + k);
-                vAcc0 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR0 + k), vV, vAcc0);
-                vAcc1 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR1 + k), vV, vAcc1);
-                vAcc2 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR2 + k), vV, vAcc2);
-                vAcc3 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR3 + k), vV, vAcc3);
-                vAcc4 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR4 + k), vV, vAcc4);
-                vAcc5 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR5 + k), vV, vAcc5);
-                vAcc6 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR6 + k), vV, vAcc6);
-                vAcc7 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR7 + k), vV, vAcc7);
-            }
-
-            float f0 = fHsumAvx(vAcc0);
-            float f1 = fHsumAvx(vAcc1);
-            float f2 = fHsumAvx(vAcc2);
-            float f3 = fHsumAvx(vAcc3);
-            float f4 = fHsumAvx(vAcc4);
-            float f5 = fHsumAvx(vAcc5);
-            float f6 = fHsumAvx(vAcc6);
-            float f7 = fHsumAvx(vAcc7);
-
-            for (; k < lKBlock; k++) {
-                float fV = pfVTile[k];
-                f0 += pfR0[k] * fV;
-                f1 += pfR1[k] * fV;
-                f2 += pfR2[k] * fV;
-                f3 += pfR3[k] * fV;
-                f4 += pfR4[k] * fV;
-                f5 += pfR5[k] * fV;
-                f6 += pfR6[k] * fV;
-                f7 += pfR7[k] * fV;
-            }
-
-            pfO[i] += f0;
-            pfO[i + 1] += f1;
-            pfO[i + 2] += f2;
-            pfO[i + 3] += f3;
-            pfO[i + 4] += f4;
-            pfO[i + 5] += f5;
-            pfO[i + 6] += f6;
-            pfO[i + 7] += f7;
-        }
-
-        for (; i + 4 <= lRowEnd; i += 4) {
-            const float *pfR0 = pfM + (i)*lK + kk;
-            const float *pfR1 = pfM + (i + 1) * lK + kk;
-            const float *pfR2 = pfM + (i + 2) * lK + kk;
-            const float *pfR3 = pfM + (i + 3) * lK + kk;
-
-            __m256 vAcc0 = _mm256_setzero_ps();
-            __m256 vAcc1 = _mm256_setzero_ps();
-            __m256 vAcc2 = _mm256_setzero_ps();
-            __m256 vAcc3 = _mm256_setzero_ps();
-
-            int64_t k = 0;
-            for (; k + 8 <= lKBlock; k += 8) {
-                __m256 vV = _mm256_loadu_ps(pfVTile + k);
-                vAcc0 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR0 + k), vV, vAcc0);
-                vAcc1 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR1 + k), vV, vAcc1);
-                vAcc2 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR2 + k), vV, vAcc2);
-                vAcc3 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR3 + k), vV, vAcc3);
-            }
-
-            float f0 = fHsumAvx(vAcc0);
-            float f1 = fHsumAvx(vAcc1);
-            float f2 = fHsumAvx(vAcc2);
-            float f3 = fHsumAvx(vAcc3);
-
-            for (; k < lKBlock; k++) {
-                float fV = pfVTile[k];
-                f0 += pfR0[k] * fV;
-                f1 += pfR1[k] * fV;
-                f2 += pfR2[k] * fV;
-                f3 += pfR3[k] * fV;
-            }
-
-            pfO[i] += f0;
-            pfO[i + 1] += f1;
-            pfO[i + 2] += f2;
-            pfO[i + 3] += f3;
-        }
+#if defined(_MSC_VER)
+#define RESTRICT __restrict
+#else
+#define RESTRICT __restrict__
 #endif
-
-        // scalar remainder rows
-        for (; i < lRowEnd; i++) {
-            const float *pfRow = pfM + i * lK + kk;
-            float fS = 0.0f;
-            int64_t k = 0;
+static void KernelMatvecRows(const float *RESTRICT pfM, const float *RESTRICT pfV, float *RESTRICT pfO, int64_t lK,
+                             int64_t lRowStart, int64_t lRowEnd) {
+    int64_t i = lRowStart;
 #if MT_X86 && defined(__AVX2__)
-            __m256 vAcc = _mm256_setzero_ps();
-            for (; k + 8 <= lKBlock; k += 8)
-                vAcc = _mm256_fmadd_ps(_mm256_loadu_ps(pfRow + k), _mm256_loadu_ps(pfVTile + k), vAcc);
-            fS = fHsumAvx(vAcc);
-#endif
-            for (; k < lKBlock; k++)
-                fS += pfRow[k] * pfVTile[k];
-            pfO[i] += fS;
+    for (; i + 8 <= lRowEnd; i += 8) {
+        const float *pfR0 = pfM + (i + 0) * lK;
+        const float *pfR1 = pfM + (i + 1) * lK;
+        const float *pfR2 = pfM + (i + 2) * lK;
+        const float *pfR3 = pfM + (i + 3) * lK;
+        const float *pfR4 = pfM + (i + 4) * lK;
+        const float *pfR5 = pfM + (i + 5) * lK;
+        const float *pfR6 = pfM + (i + 6) * lK;
+        const float *pfR7 = pfM + (i + 7) * lK;
+
+        __m256 vAcc0 = _mm256_setzero_ps();
+        __m256 vAcc1 = _mm256_setzero_ps();
+        __m256 vAcc2 = _mm256_setzero_ps();
+        __m256 vAcc3 = _mm256_setzero_ps();
+        __m256 vAcc4 = _mm256_setzero_ps();
+        __m256 vAcc5 = _mm256_setzero_ps();
+        __m256 vAcc6 = _mm256_setzero_ps();
+        __m256 vAcc7 = _mm256_setzero_ps();
+
+        int64_t k = 0;
+
+        // ur2 process 16 elm per loop iter
+        for (; k + 16 <= lK; k += 16) {
+            __m256 vV0 = _mm256_loadu_ps(pfV + k);
+            __m256 vV1 = _mm256_loadu_ps(pfV + k + 8);
+
+            // c0 (first 8 elements)
+            vAcc0 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR0 + k), vV0, vAcc0);
+            vAcc1 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR1 + k), vV0, vAcc1);
+            vAcc2 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR2 + k), vV0, vAcc2);
+            vAcc3 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR3 + k), vV0, vAcc3);
+            vAcc4 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR4 + k), vV0, vAcc4);
+            vAcc5 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR5 + k), vV0, vAcc5);
+            vAcc6 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR6 + k), vV0, vAcc6);
+            vAcc7 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR7 + k), vV0, vAcc7);
+
+            // c1 (next 8 elements)
+            vAcc0 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR0 + k + 8), vV1, vAcc0);
+            vAcc1 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR1 + k + 8), vV1, vAcc1);
+            vAcc2 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR2 + k + 8), vV1, vAcc2);
+            vAcc3 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR3 + k + 8), vV1, vAcc3);
+            vAcc4 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR4 + k + 8), vV1, vAcc4);
+            vAcc5 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR5 + k + 8), vV1, vAcc5);
+            vAcc6 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR6 + k + 8), vV1, vAcc6);
+            vAcc7 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR7 + k + 8), vV1, vAcc7);
         }
+
+        // clean up remaining k in blocks of 8
+        for (; k + 8 <= lK; k += 8) {
+            __m256 vV = _mm256_loadu_ps(pfV + k);
+            vAcc0 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR0 + k), vV, vAcc0);
+            vAcc1 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR1 + k), vV, vAcc1);
+            vAcc2 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR2 + k), vV, vAcc2);
+            vAcc3 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR3 + k), vV, vAcc3);
+            vAcc4 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR4 + k), vV, vAcc4);
+            vAcc5 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR5 + k), vV, vAcc5);
+            vAcc6 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR6 + k), vV, vAcc6);
+            vAcc7 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR7 + k), vV, vAcc7);
+        }
+
+        // horizontal sum happens EXACTLY ONCE per row!!!
+        float f0 = fHsumAvx(vAcc0);
+        float f1 = fHsumAvx(vAcc1);
+        float f2 = fHsumAvx(vAcc2);
+        float f3 = fHsumAvx(vAcc3);
+        float f4 = fHsumAvx(vAcc4);
+        float f5 = fHsumAvx(vAcc5);
+        float f6 = fHsumAvx(vAcc6);
+        float f7 = fHsumAvx(vAcc7);
+
+        // sr
+        for (; k < lK; k++) {
+            float fV = pfV[k];
+            f0 += pfR0[k] * fV;
+            f1 += pfR1[k] * fV;
+            f2 += pfR2[k] * fV;
+            f3 += pfR3[k] * fV;
+            f4 += pfR4[k] * fV;
+            f5 += pfR5[k] * fV;
+            f6 += pfR6[k] * fV;
+            f7 += pfR7[k] * fV;
+        }
+
+        // direct write 1ce
+        pfO[i + 0] = f0;
+        pfO[i + 1] = f1;
+        pfO[i + 2] = f2;
+        pfO[i + 3] = f3;
+        pfO[i + 4] = f4;
+        pfO[i + 5] = f5;
+        pfO[i + 6] = f6;
+        pfO[i + 7] = f7;
+    }
+
+    // process rem rs in chunks of 4
+    for (; i + 4 <= lRowEnd; i += 4) {
+        const float *pfR0 = pfM + (i + 0) * lK;
+        const float *pfR1 = pfM + (i + 1) * lK;
+        const float *pfR2 = pfM + (i + 2) * lK;
+        const float *pfR3 = pfM + (i + 3) * lK;
+
+        __m256 vAcc0 = _mm256_setzero_ps();
+        __m256 vAcc1 = _mm256_setzero_ps();
+        __m256 vAcc2 = _mm256_setzero_ps();
+        __m256 vAcc3 = _mm256_setzero_ps();
+
+        int64_t k = 0;
+        for (; k + 16 <= lK; k += 16) {
+            __m256 vV0 = _mm256_loadu_ps(pfV + k);
+            __m256 vV1 = _mm256_loadu_ps(pfV + k + 8);
+
+            vAcc0 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR0 + k), vV0, vAcc0);
+            vAcc1 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR1 + k), vV0, vAcc1);
+            vAcc2 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR2 + k), vV0, vAcc2);
+            vAcc3 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR3 + k), vV0, vAcc3);
+
+            vAcc0 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR0 + k + 8), vV1, vAcc0);
+            vAcc1 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR1 + k + 8), vV1, vAcc1);
+            vAcc2 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR2 + k + 8), vV1, vAcc2);
+            vAcc3 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR3 + k + 8), vV1, vAcc3);
+        }
+
+        for (; k + 8 <= lK; k += 8) {
+            __m256 vV = _mm256_loadu_ps(pfV + k);
+            vAcc0 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR0 + k), vV, vAcc0);
+            vAcc1 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR1 + k), vV, vAcc1);
+            vAcc2 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR2 + k), vV, vAcc2);
+            vAcc3 = _mm256_fmadd_ps(_mm256_loadu_ps(pfR3 + k), vV, vAcc3);
+        }
+
+        float f0 = fHsumAvx(vAcc0);
+        float f1 = fHsumAvx(vAcc1);
+        float f2 = fHsumAvx(vAcc2);
+        float f3 = fHsumAvx(vAcc3);
+
+        for (; k < lK; k++) {
+            float fV = pfV[k];
+            f0 += pfR0[k] * fV;
+            f1 += pfR1[k] * fV;
+            f2 += pfR2[k] * fV;
+            f3 += pfR3[k] * fV;
+        }
+
+        pfO[i + 0] = f0;
+        pfO[i + 1] = f1;
+        pfO[i + 2] = f2;
+        pfO[i + 3] = f3;
+    }
+#endif
+    for (; i < lRowEnd; i++) {
+        const float *pfRow = pfM + i * lK;
+        float fS = 0.0f;
+        int64_t k = 0;
+#if MT_X86 && defined(__AVX2__)
+        __m256 vAcc = _mm256_setzero_ps();
+        for (; k + 8 <= lK; k += 8)
+            vAcc = _mm256_fmadd_ps(_mm256_loadu_ps(pfRow + k), _mm256_loadu_ps(pfV + k), vAcc);
+        fS = fHsumAvx(vAcc);
+#endif
+        for (; k < lK; k++)
+            fS += pfRow[k] * pfV[k];
+        pfO[i] = fS;
     }
 }
 // >>>s_end(mmk)
@@ -761,9 +794,8 @@ auto Matvec(const CTensor &tMat, const CTensor &tVec) -> CTensor {
     int iActualThreads = 1;
 
     if (lMatBytes > 4 * 1024 * 1024) {
-        // cap at 4 threads bc dual channel ddr4 saturates around 2-3 cores
         int iThreads = TH::GetGlobalPool().iNumThreads();
-        iActualThreads = std::min(4, iThreads);
+        // iActualThreads = std::min(4, iThreads);
         iActualThreads = (int)std::min((int64_t)iActualThreads, lM / 64);
         if (iActualThreads < 1)
             iActualThreads = 1;
