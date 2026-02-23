@@ -1025,27 +1025,46 @@ auto CBpeTokenizer::EncodeBpeChunk(const std::string &szChunk) const -> std::vec
 
     while (true) {
         int32_t iBestRank = INT32_MAX;
-        int32_t iBestIdx = -1;
         int64_t lBestKey = -1;
+        bool bFound = false;
 
-        for (int32_t j = 0; j < (int32_t)viTokens.size() - 1; j++) {
+        for (size_t j = 0; j < viTokens.size() - 1; j++) {
             int64_t lKey = lPackPair(viTokens[j], viTokens[j + 1]);
             auto itRank = m_mMergeRank.find(lKey);
-            if (itRank != m_mMergeRank.end() && itRank->second < iBestRank) {
-                iBestRank = itRank->second;
-                iBestIdx = j;
-                lBestKey = lKey;
+            if (itRank != m_mMergeRank.end()) {
+                if (itRank->second < iBestRank) {
+                    iBestRank = itRank->second;
+                    lBestKey = lKey;
+                    bFound = true;
+                }
             }
         }
 
-        if (iBestIdx < 0)
+        if (!bFound)
             break;
 
         auto itMerged = m_mMerges.find(lBestKey);
-        assert(itMerged != m_mMerges.end());
+        int32_t iMergedId = itMerged->second;
 
-        viTokens[iBestIdx] = itMerged->second;
-        viTokens.erase(viTokens.begin() + iBestIdx + 1);
+        std::vector<int32_t> viNewTokens;
+        viNewTokens.reserve(viTokens.size());
+
+        size_t j = 0;
+        while (j < viTokens.size()) {
+            if (j + 1 < viTokens.size()) {
+                int64_t lKey = lPackPair(viTokens[j], viTokens[j + 1]);
+                if (lKey == lBestKey) {
+                    viNewTokens.push_back(iMergedId);
+                    j += 2;
+                    continue;
+                }
+            }
+            viNewTokens.push_back(viTokens[j]);
+            j++;
+        }
+        viTokens = std::move(viNewTokens);
+        if (viTokens.size() < 2)
+            break;
     }
 
     return viTokens;
