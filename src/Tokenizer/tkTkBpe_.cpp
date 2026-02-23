@@ -20,7 +20,12 @@ namespace TK {
  * PARMS: none
  * AUTH: unium (23.02.26)
  *-------------------------------------------------------*/
-CBpeTokenizer::CBpeTokenizer() : m_iBosId(0), m_iEosId(0), m_iUnkId(0) {}
+CBpeTokenizer::CBpeTokenizer() : m_iBosId(0), m_iEosId(0), m_iUnkId(0) {
+    std::memset(m_viByteCharToId, 0xFF, sizeof(m_viByteCharToId));
+    std::memset(m_vGptBytesFast, 0, sizeof(m_vGptBytesFast));
+    std::memset(m_viGptToByteDirectAscii, 0, sizeof(m_viGptToByteDirectAscii));
+    std::memset(m_vbGptToByteDirectValid, 0, sizeof(m_vbGptToByteDirectValid));
+}
 
 /*---------------------------------------------------------
  * FN: ~CBpeTokenizer
@@ -115,6 +120,15 @@ void CBpeTokenizer::BuildGptByteMap() {
 
         m_vszByteToGpt[iByte] = szUtf8;
         m_mGptToByte[szUtf8] = (uint8_t)iByte;
+
+        SGptByteEntry &e = m_vGptBytesFast[iByte];
+        e.m_iLen = (uint8_t)szUtf8.size();
+        std::memcpy(e.m_szData, szUtf8.data(), szUtf8.size());
+
+        if (szUtf8.size() == 1 && (unsigned char)szUtf8[0] < 128) {
+            m_viGptToByteDirectAscii[(unsigned char)szUtf8[0]] = (uint8_t)iByte;
+            m_vbGptToByteDirectValid[(unsigned char)szUtf8[0]] = true;
+        }
     }
 }
 
@@ -128,7 +142,8 @@ auto CBpeTokenizer::szTextToGptBytes(const std::string &szIn) const -> std::stri
     std::string szOut;
     szOut.reserve(szIn.size() * 2);
     for (unsigned char c : szIn) {
-        szOut += m_vszByteToGpt[c];
+        const SGptByteEntry &e = m_vGptBytesFast[c];
+        szOut.append(e.m_szData, e.m_iLen);
     }
     return szOut;
 }
@@ -143,27 +158,27 @@ auto CBpeTokenizer::szGptBytesToText(const std::string &szIn) const -> std::stri
     std::string szOut;
     szOut.reserve(szIn.size());
 
+    const char *pData = szIn.data();
+    const size_t iSize = szIn.size();
     size_t i = 0;
-    while (i < szIn.size()) {
-        unsigned char c = (unsigned char)szIn[i];
-        int iLen = 1;
-        if ((c & 0x80) == 0)
-            iLen = 1;
-        else if ((c & 0xE0) == 0xC0)
-            iLen = 2;
-        else if ((c & 0xF0) == 0xE0)
-            iLen = 3;
-        else if ((c & 0xF8) == 0xF0)
-            iLen = 4;
-        if (i + iLen > szIn.size())
+    while (i < iSize) {
+        unsigned char c = (unsigned char)pData[i];
+
+        if (c < 128 && m_vbGptToByteDirectValid[c]) {
+            szOut += (char)m_viGptToByteDirectAscii[c];
+            i++;
+            continue;
+        }
+
+        int iLen = iUtf8CharLen(c);
+        if (i + iLen > iSize)
             iLen = 1;
 
-        std::string szChar = szIn.substr(i, iLen);
-        auto it = m_mGptToByte.find(szChar);
+        auto it = m_mGptToByte.find(std::string(pData + i, iLen));
         if (it != m_mGptToByte.end()) {
             szOut += (char)it->second;
         } else {
-            szOut += szChar;
+            szOut.append(pData + i, iLen);
         }
         i += iLen;
     }
@@ -179,7 +194,8 @@ auto CBpeTokenizer::szGptBytesToText(const std::string &szIn) const -> std::stri
  *-------------------------------------------------------*/
 auto CBpeTokenizer::PreTokenize(const std::string &szText) const -> std::vector<std::string> {
     std::vector<std::string> vChunks;
-    size_t iLen = szText.size();
+    const size_t iLen = szText.size();
+    const char *pData = szText.data();
     size_t i = 0;
 
     // 's|'t|'re|'ve|'m|'ll|'d
@@ -192,22 +208,24 @@ auto CBpeTokenizer::PreTokenize(const std::string &szText) const -> std::vector<
     auto bIsDigit = [](unsigned char c) -> bool { return c >= '0' && c <= '9'; };
     auto bIsWs = [](unsigned char c) -> bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
 
+    vChunks.reserve(iLen / 4 + 16);
+
     while (i < iLen) {
-        unsigned char c = (unsigned char)szText[i];
+        unsigned char c = (unsigned char)pData[i];
 
         // 's 't 'm 'd 're 've 'll
         if (c == '\'' && i + 1 < iLen) {
-            char cn = szText[i + 1];
+            char cn = pData[i + 1];
             if (cn == 's' || cn == 'S' || cn == 't' || cn == 'T' || cn == 'm' || cn == 'M' || cn == 'd' || cn == 'D') {
-                vChunks.push_back(szText.substr(i, 2));
+                vChunks.emplace_back(pData + i, 2);
                 i += 2;
                 continue;
             }
             if (i + 2 < iLen) {
-                char c2 = szText[i + 2];
+                char c2 = pData[i + 2];
                 if (((cn | 32) == 'r' && (c2 | 32) == 'e') || ((cn | 32) == 'v' && (c2 | 32) == 'e') ||
                     ((cn | 32) == 'l' && (c2 | 32) == 'l')) {
-                    vChunks.push_back(szText.substr(i, 3));
+                    vChunks.emplace_back(pData + i, 3);
                     i += 3;
                     continue;
                 }
@@ -215,34 +233,34 @@ auto CBpeTokenizer::PreTokenize(const std::string &szText) const -> std::vector<
         }
 
         // space+letters
-        if (c == ' ' && i + 1 < iLen && bIsLetter((unsigned char)szText[i + 1])) {
+        if (c == ' ' && i + 1 < iLen && bIsLetter((unsigned char)pData[i + 1])) {
             size_t iStart = i;
             i++;
-            while (i < iLen && bIsLetter((unsigned char)szText[i]))
+            while (i < iLen && bIsLetter((unsigned char)pData[i]))
                 i++;
-            vChunks.push_back(szText.substr(iStart, i - iStart));
+            vChunks.emplace_back(pData + iStart, i - iStart);
             continue;
         }
 
         // letters
         if (bIsLetter(c)) {
             size_t iStart = i;
-            while (i < iLen && bIsLetter((unsigned char)szText[i]))
+            while (i < iLen && bIsLetter((unsigned char)pData[i]))
                 i++;
-            vChunks.push_back(szText.substr(iStart, i - iStart));
+            vChunks.emplace_back(pData + iStart, i - iStart);
             continue;
         }
 
         // space+digits [3]
-        if (c == ' ' && i + 1 < iLen && bIsDigit((unsigned char)szText[i + 1])) {
+        if (c == ' ' && i + 1 < iLen && bIsDigit((unsigned char)pData[i + 1])) {
             size_t iStart = i;
             i++;
             int iCount = 0;
-            while (i < iLen && bIsDigit((unsigned char)szText[i]) && iCount < 3) {
+            while (i < iLen && bIsDigit((unsigned char)pData[i]) && iCount < 3) {
                 i++;
                 iCount++;
             }
-            vChunks.push_back(szText.substr(iStart, i - iStart));
+            vChunks.emplace_back(pData + iStart, i - iStart);
             continue;
         }
 
@@ -250,29 +268,29 @@ auto CBpeTokenizer::PreTokenize(const std::string &szText) const -> std::vector<
         if (bIsDigit(c)) {
             size_t iStart = i;
             int iCount = 0;
-            while (i < iLen && bIsDigit((unsigned char)szText[i]) && iCount < 3) {
+            while (i < iLen && bIsDigit((unsigned char)pData[i]) && iCount < 3) {
                 i++;
                 iCount++;
             }
-            vChunks.push_back(szText.substr(iStart, i - iStart));
+            vChunks.emplace_back(pData + iStart, i - iStart);
             continue;
         }
 
         // nls
         if (c == '\n' || c == '\r') {
             size_t iStart = i;
-            while (i < iLen && (szText[i] == '\n' || szText[i] == '\r'))
+            while (i < iLen && (pData[i] == '\n' || pData[i] == '\r'))
                 i++;
-            vChunks.push_back(szText.substr(iStart, i - iStart));
+            vChunks.emplace_back(pData + iStart, i - iStart);
             continue;
         }
 
         // whitespace nnl
         if (bIsWs(c)) {
             size_t iStart = i;
-            while (i < iLen && bIsWs((unsigned char)szText[i]) && szText[i] != '\n' && szText[i] != '\r')
+            while (i < iLen && bIsWs((unsigned char)pData[i]) && pData[i] != '\n' && pData[i] != '\r')
                 i++;
-            vChunks.push_back(szText.substr(iStart, i - iStart));
+            vChunks.emplace_back(pData + iStart, i - iStart);
             continue;
         }
 
@@ -282,17 +300,17 @@ auto CBpeTokenizer::PreTokenize(const std::string &szText) const -> std::vector<
             if (c == ' ')
                 i++;
             if (i < iLen) {
-                unsigned char cc = (unsigned char)szText[i];
+                unsigned char cc = (unsigned char)pData[i];
                 while (i < iLen && !bIsLetter(cc) && !bIsDigit(cc) && !bIsWs(cc)) {
                     i++;
                     if (i < iLen)
-                        cc = (unsigned char)szText[i];
+                        cc = (unsigned char)pData[i];
                 }
             }
             if (i > iStart) {
-                vChunks.push_back(szText.substr(iStart, i - iStart));
+                vChunks.emplace_back(pData + iStart, i - iStart);
             } else {
-                vChunks.push_back(szText.substr(i, 1));
+                vChunks.emplace_back(pData + i, 1);
                 i++;
             }
         }
@@ -310,8 +328,14 @@ auto CBpeTokenizer::PreTokenize(const std::string &szText) const -> std::vector<
  * AUTH: unium (23.02.26)
  *-------------------------------------------------------*/
 void CBpeTokenizer::SkipWs(const std::string &s, size_t &p) {
-    while (p < s.size() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r'))
+    const char *pData = s.data();
+    const size_t iSize = s.size();
+    while (p < iSize) {
+        char c = pData[p];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
+            break;
         p++;
+    }
 }
 
 /*---------------------------------------------------------
@@ -407,14 +431,22 @@ auto CBpeTokenizer::ParseJsonStringPtr(const char *&p, const char *pEnd) -> std:
     const char *pStart = p;
     const char *pScan = p;
     bool bHasEscape = false;
-    while (pScan < pEnd && *pScan != '"') {
-        if (*pScan == '\\') {
-            bHasEscape = true;
-            pScan++;
-            if (pScan < pEnd)
-                pScan++;
-        } else
-            pScan++;
+
+    while (pScan < pEnd) {
+        const char *pQuote = (const char *)std::memchr(pScan, '"', pEnd - pScan);
+        if (!pQuote) {
+            pScan = pEnd;
+            break;
+        }
+        const char *pBack = (const char *)std::memchr(pScan, '\\', pQuote - pScan);
+        if (!pBack) {
+            pScan = pQuote;
+            break;
+        }
+        bHasEscape = true;
+        pScan = pBack + 2;
+        if (pScan > pEnd)
+            pScan = pEnd;
     }
 
     if (!bHasEscape) {
@@ -816,11 +848,12 @@ auto CBpeTokenizer::bLoadFromJsonFile(const std::string &szPath) -> bool {
 
                     std::string szMerge = ParseJsonStringPtr(p, pEnd);
 
-                    size_t iSp = szMerge.find(' ');
-                    if (iSp == std::string::npos) {
+                    const char *pSp = (const char *)std::memchr(szMerge.data(), ' ', szMerge.size());
+                    if (!pSp) {
                         iRank++;
                         continue;
                     }
+                    size_t iSp = pSp - szMerge.data();
 
                     std::string szLeft(szMerge, 0, iSp);
                     std::string szRight(szMerge, iSp + 1);
@@ -885,6 +918,19 @@ skip_merges:
         BuildGptByteMap();
     }
 
+    std::memset(m_viByteCharToId, 0xFF, sizeof(m_viByteCharToId));
+    if (m_bByteLevel) {
+        for (int b = 0; b < 256; b++) {
+            const std::string &szGpt = m_vszByteToGpt[b];
+            if (!szGpt.empty()) {
+                auto it = m_mTextToId.find(szGpt);
+                if (it != m_mTextToId.end()) {
+                    m_viByteCharToId[b] = it->second;
+                }
+            }
+        }
+    }
+
     m_vAddedTokens.clear();
     for (int32_t i = 0; i < (int32_t)m_vVocab.size(); i++) {
         if (m_vVocab[i].m_bAdded && !m_vVocab[i].m_szText.empty()) {
@@ -924,14 +970,16 @@ auto CBpeTokenizer::Encode(const std::string &szText) const -> std::vector<int32
     };
     std::vector<SSeg> vSegs;
 
+    const char *pData = szText.data();
+    const size_t iTextLen = szText.size();
     size_t iPos = 0;
-    while (iPos < szText.size()) {
+    while (iPos < iTextLen) {
         bool bFound = false;
         for (const auto &at : m_vAddedTokens) {
-            if (iPos + at.m_szText.size() <= szText.size() &&
-                szText.compare(iPos, at.m_szText.size(), at.m_szText) == 0) {
+            const size_t iAtLen = at.m_szText.size();
+            if (iPos + iAtLen <= iTextLen && std::memcmp(pData + iPos, at.m_szText.data(), iAtLen) == 0) {
                 vSegs.push_back({true, at.m_iId, ""});
-                iPos += at.m_szText.size();
+                iPos += iAtLen;
                 bFound = true;
                 break;
             }
@@ -940,7 +988,7 @@ auto CBpeTokenizer::Encode(const std::string &szText) const -> std::vector<int32
             if (vSegs.empty() || vSegs.back().bAdded) {
                 vSegs.push_back({false, 0, ""});
             }
-            vSegs.back().szText += szText[iPos];
+            vSegs.back().szText += pData[iPos];
             iPos++;
         }
     }
@@ -970,6 +1018,7 @@ auto CBpeTokenizer::EncodeBpe(const std::string &szText) const -> std::vector<in
     if (m_bByteLevel) {
         auto vChunks = PreTokenize(szText);
         std::vector<int32_t> viResult;
+        viResult.reserve(szText.size());
         for (const auto &szChunk : vChunks) {
             std::string szGpt = szTextToGptBytes(szChunk);
             auto vi = EncodeBpeChunk(szGpt);
@@ -991,53 +1040,95 @@ auto CBpeTokenizer::EncodeBpeChunk(const std::string &szChunk) const -> std::vec
     if (szChunk.empty())
         return {};
 
-    std::vector<int32_t> viTokens;
-    viTokens.reserve(szChunk.size());
+    struct SNode {
+        int32_t iTokenId;
+        int32_t iPrev;
+        int32_t iNext;
+    };
+
+    // post pretokenize chunks are (usually) <30 chars
+    static constexpr int32_t kStackNodes = 64;
+    SNode aStack[kStackNodes];
+    std::vector<SNode> vHeap;
+    SNode *pNodes = aStack;
+    int32_t iNodeCount = 0;
+    int32_t iNodeCap = kStackNodes;
+
+    auto fnEnsureNodes = [&](int32_t iNeed) {
+        if (iNeed <= iNodeCap)
+            return;
+        if (pNodes == aStack) {
+            vHeap.resize(iNeed * 2);
+            std::memcpy(vHeap.data(), aStack, iNodeCount * sizeof(SNode));
+        } else {
+            vHeap.resize(iNeed * 2);
+        }
+        pNodes = vHeap.data();
+        iNodeCap = (int32_t)vHeap.size();
+    };
 
     // split into individual chars, kys utf8
+    const char *pData = szChunk.data();
+    const size_t iChunkSize = szChunk.size();
     size_t i = 0;
-    while (i < szChunk.size()) {
-        unsigned char c = (unsigned char)szChunk[i];
-        int iLen = 1;
-        if ((c & 0x80) == 0) // 0xxxxxxx 1b
-            iLen = 1;
-        else if ((c & 0xE0) == 0xC0) // 110xxxxx 2b
-            iLen = 2;
-        else if ((c & 0xF0) == 0xE0) // 1110xxxx 3b
-            iLen = 3;
-        else if ((c & 0xF8) == 0xF0) // 11110xxx 4b
-            iLen = 4;
-        if (i + iLen > szChunk.size())
+    while (i < iChunkSize) {
+        unsigned char c = (unsigned char)pData[i];
+        int iLen = iUtf8CharLen(c);
+        if (i + iLen > iChunkSize)
             iLen = 1;
 
-        std::string szChar = szChunk.substr(i, iLen);
-        auto it = m_mTextToId.find(szChar);
-        if (it != m_mTextToId.end()) {
-            viTokens.push_back(it->second);
-        } else {
-            viTokens.push_back(m_iUnkId);
-        }
+        auto it = m_mTextToId.find(std::string(pData + i, iLen));
+        int32_t iId = (it != m_mTextToId.end()) ? it->second : m_iUnkId;
+
+        fnEnsureNodes(iNodeCount + 1);
+        int32_t iIdx = iNodeCount++;
+        pNodes[iIdx].iTokenId = iId;
+        pNodes[iIdx].iPrev = iIdx > 0 ? iIdx - 1 : -1;
+        pNodes[iIdx].iNext = -1;
+        if (iIdx > 0)
+            pNodes[iIdx - 1].iNext = iIdx;
+
         i += iLen;
     }
 
-    if (viTokens.size() < 2)
-        return viTokens;
+    if (iNodeCount < 2) {
+        std::vector<int32_t> viResult;
+        if (iNodeCount == 1)
+            viResult.push_back(pNodes[0].iTokenId);
+        return viResult;
+    }
 
     while (true) {
         int32_t iBestRank = INT32_MAX;
         int64_t lBestKey = -1;
+        int32_t iBestNode = -1;
         bool bFound = false;
 
-        for (size_t j = 0; j < viTokens.size() - 1; j++) {
-            int64_t lKey = lPackPair(viTokens[j], viTokens[j + 1]);
+        int32_t iCur = 0;
+        while (iCur >= 0 && iCur < iNodeCount && pNodes[iCur].iPrev == -2)
+            iCur++;
+        if (iCur < iNodeCount && pNodes[iCur].iPrev >= 0) {
+            int32_t iWalk = iCur;
+            while (pNodes[iWalk].iPrev >= 0)
+                iWalk = pNodes[iWalk].iPrev;
+            iCur = iWalk;
+        }
+
+        while (iCur >= 0) {
+            int32_t iNxt = pNodes[iCur].iNext;
+            if (iNxt < 0)
+                break;
+            int64_t lKey = lPackPair(pNodes[iCur].iTokenId, pNodes[iNxt].iTokenId);
             auto itRank = m_mMergeRank.find(lKey);
             if (itRank != m_mMergeRank.end()) {
                 if (itRank->second < iBestRank) {
                     iBestRank = itRank->second;
                     lBestKey = lKey;
+                    iBestNode = iCur;
                     bFound = true;
                 }
             }
+            iCur = iNxt;
         }
 
         if (!bFound)
@@ -1046,28 +1137,55 @@ auto CBpeTokenizer::EncodeBpeChunk(const std::string &szChunk) const -> std::vec
         auto itMerged = m_mMerges.find(lBestKey);
         int32_t iMergedId = itMerged->second;
 
-        std::vector<int32_t> viNewTokens;
-        viNewTokens.reserve(viTokens.size());
-
-        size_t j = 0;
-        while (j < viTokens.size()) {
-            if (j + 1 < viTokens.size()) {
-                int64_t lKey = lPackPair(viTokens[j], viTokens[j + 1]);
-                if (lKey == lBestKey) {
-                    viNewTokens.push_back(iMergedId);
-                    j += 2;
-                    continue;
-                }
-            }
-            viNewTokens.push_back(viTokens[j]);
-            j++;
+        iCur = 0;
+        while (iCur < iNodeCount && pNodes[iCur].iPrev == -2)
+            iCur++;
+        if (iCur < iNodeCount && pNodes[iCur].iPrev >= 0) {
+            int32_t iWalk = iCur;
+            while (pNodes[iWalk].iPrev >= 0)
+                iWalk = pNodes[iWalk].iPrev;
+            iCur = iWalk;
         }
-        viTokens = std::move(viNewTokens);
-        if (viTokens.size() < 2)
-            break;
+
+        while (iCur >= 0) {
+            int32_t iNxt = pNodes[iCur].iNext;
+            if (iNxt < 0)
+                break;
+            int64_t lKey = lPackPair(pNodes[iCur].iTokenId, pNodes[iNxt].iTokenId);
+            if (lKey == lBestKey) {
+                pNodes[iCur].iTokenId = iMergedId;
+                pNodes[iCur].iNext = pNodes[iNxt].iNext;
+                if (pNodes[iNxt].iNext >= 0)
+                    pNodes[pNodes[iNxt].iNext].iPrev = iCur;
+                pNodes[iNxt].iPrev = -2;
+                pNodes[iNxt].iNext = -2;
+                continue;
+            }
+            iCur = iNxt;
+        }
     }
 
-    return viTokens;
+    std::vector<int32_t> viResult;
+    viResult.reserve(iNodeCount);
+    int32_t iHead = 0;
+    while (iHead < iNodeCount && pNodes[iHead].iPrev == -2)
+        iHead++;
+    if (iHead < iNodeCount && pNodes[iHead].iPrev >= 0) {
+        int32_t iWalk = iHead;
+        while (pNodes[iWalk].iPrev >= 0)
+            iWalk = pNodes[iWalk].iPrev;
+        iHead = iWalk;
+    }
+
+    {
+        int32_t iCur = iHead;
+        while (iCur >= 0) {
+            viResult.push_back(pNodes[iCur].iTokenId);
+            iCur = pNodes[iCur].iNext;
+        }
+    }
+
+    return viResult;
 }
 
 /*---------------------------------------------------------
@@ -1079,8 +1197,15 @@ auto CBpeTokenizer::EncodeBpeChunk(const std::string &szChunk) const -> std::vec
  *-------------------------------------------------------*/
 auto CBpeTokenizer::Decode(const std::vector<int32_t> &viTokens) const -> std::string {
     std::string szOut;
+    size_t iEstimate = 0;
+    const int32_t iVocabSz = (int32_t)m_vVocab.size();
     for (int32_t iToken : viTokens) {
-        if (iToken < 0 || iToken >= (int32_t)m_vVocab.size())
+        if (iToken >= 0 && iToken < iVocabSz && !m_vVocab[iToken].m_bSpecial)
+            iEstimate += m_vVocab[iToken].m_szText.size();
+    }
+    szOut.reserve(iEstimate);
+    for (int32_t iToken : viTokens) {
+        if (iToken < 0 || iToken >= iVocabSz)
             continue;
         const auto &info = m_vVocab[iToken];
         if (info.m_bSpecial)

@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -186,6 +187,16 @@ private:
     std::string m_vszByteToGpt[256];
     std::unordered_map<std::string, uint8_t> m_mGptToByte;
 
+    int32_t m_viByteCharToId[256];
+    struct SGptByteEntry {
+        char m_szData[4];
+        uint8_t m_iLen;
+    };
+    SGptByteEntry m_vGptBytesFast[256];
+
+    uint8_t m_viGptToByteDirectAscii[128];
+    bool m_vbGptToByteDirectValid[128];
+
     /*---------------------------------------------------------
      * FN: EnsureVocabSize
      * DESC: grows the vocab vector if needed to fit iId
@@ -286,5 +297,17 @@ private:
      *-------------------------------------------------------*/
     static void SkipJsonValue(const std::string &s, size_t &p);
     // >>>s_end(json)
+
+    static inline int iUtf8CharLen(unsigned char c) {
+        if ((c & 0x80) == 0)
+            return 1;
+        if ((c & 0xE0) == 0xC0)
+            return 2;
+        if ((c & 0xF0) == 0xE0)
+            return 3;
+        if ((c & 0xF8) == 0xF0)
+            return 4;
+        return 1;
+    }
 };
 } // namespace TK
