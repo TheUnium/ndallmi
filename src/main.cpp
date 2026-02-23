@@ -21,6 +21,9 @@ TEST_MODULE("tensor/simd")
 
 TEST_MODULE("thread/thread")
 #include "Tests/tsThThrd.hpp"
+
+TEST_MODULE("tokenizer/bpe")
+#include "Tests/tsTkTnzr.hpp"
 // >>>s_end(includes)
 
 // <<<s_start(main)
