@@ -1077,7 +1077,8 @@ auto CBpeTokenizer::EncodeBpeChunk(const std::string &szChunk) const -> std::vec
         if (i + iLen > iChunkSize)
             iLen = 1;
 
-        auto it = m_mTextToId.find(std::string(pData + i, iLen));
+        std::string_view svChar(pData + i, iLen);
+        auto it = m_mTextToId.find(svChar);
         int32_t iId = (it != m_mTextToId.end()) ? it->second : m_iUnkId;
 
         fnEnsureNodes(iNodeCount + 1);
@@ -1335,10 +1336,10 @@ void CBpeTokenizer::BuildFromVocab() {
         for (size_t iSplit = 1; iSplit < szText.size(); iSplit++) {
             if ((unsigned char)szText[iSplit] >= 0x80 && (unsigned char)szText[iSplit] < 0xC0)
                 continue;
-            std::string szL = szText.substr(0, iSplit);
-            std::string szR = szText.substr(iSplit);
-            auto itL = m_mTextToId.find(szL);
-            auto itR = m_mTextToId.find(szR);
+            std::string_view svL(szText.data(), iSplit);
+            std::string_view svR(szText.data() + iSplit, szText.size() - iSplit);
+            auto itL = m_mTextToId.find(svL);
+            auto itR = m_mTextToId.find(svR);
             if (itL != m_mTextToId.end() && itR != m_mTextToId.end()) {
                 int64_t lKey = lPackPair(itL->second, itR->second);
                 if (m_mMerges.find(lKey) == m_mMerges.end()) {

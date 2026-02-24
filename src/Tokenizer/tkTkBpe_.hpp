@@ -174,7 +174,18 @@ public:
 
 private:
     std::vector<STokenInfo> m_vVocab;
-    std::unordered_map<std::string, int32_t> m_mTextToId;
+    struct SStringHash {
+        using is_transparent = void;
+        size_t operator()(std::string_view sv) const noexcept { return std::hash<std::string_view>{}(sv); }
+        size_t operator()(const std::string &s) const noexcept {
+            return std::hash<std::string_view>{}(std::string_view(s));
+        }
+    };
+    struct SStringEqual {
+        using is_transparent = void;
+        bool operator()(std::string_view a, std::string_view b) const noexcept { return a == b; }
+    };
+    std::unordered_map<std::string, int32_t, SStringHash, SStringEqual> m_mTextToId;
     std::unordered_map<int64_t, int32_t> m_mMerges;
     std::unordered_map<int64_t, int32_t> m_mMergeRank;
     std::vector<SAddedTokenEntry> m_vAddedTokens;
@@ -185,7 +196,7 @@ private:
 
     bool m_bByteLevel = false;
     std::string m_vszByteToGpt[256];
-    std::unordered_map<std::string, uint8_t> m_mGptToByte;
+    std::unordered_map<std::string, uint8_t, SStringHash, SStringEqual> m_mGptToByte;
 
     int32_t m_viByteCharToId[256];
     struct SGptByteEntry {
