@@ -5,7 +5,7 @@ project {
     version = "0.0.1",
     description = "Model Loader and Inference Engine",
     language = "cpp",
-    cpp_standard = 17
+    cpp_standard = 20
 }
 
 executable "llm" {
