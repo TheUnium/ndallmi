@@ -8,11 +8,14 @@ project {
     cpp_standard = 20
 }
 
-executable "llm" {
+executable "tests" {
     src = [
-        globs {
-            "src/**/*.cpp"
-        }
+        globs { "src/Model/*.cpp" },
+        globs { "src/Tensor/*.cpp" },
+        globs { "src/Tests/*.cpp" },
+        globs { "src/Thread/*.cpp" },
+        globs { "src/Tokenizer/*.cpp" },
+        "src/tests.cpp"
     ],
     include = {
         public = ["src"]
