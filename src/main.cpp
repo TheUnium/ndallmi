@@ -19,6 +19,9 @@ TEST_MODULE("tensor/ops")
 TEST_MODULE("tensor/simd")
 #include "Tests/tsTnSimd.hpp"
 
+TEST_MODULE("tensor/qnt8")
+#include "Tests/tsTnQnt8.hpp"
+
 TEST_MODULE("thread/thread")
 #include "Tests/tsThThrd.hpp"
 
