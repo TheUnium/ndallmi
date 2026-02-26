@@ -627,7 +627,7 @@ TEST(bench_decode_short) {
     std::vector<int32_t> viTokens;
     for (int i = 0; i < 20; i++)
         viTokens.push_back((i % 26) + 1);
-    Bench("decode 20 tokens", 500000000, [&]() {
+    Bench("decode 20 tokens", 5000, [&]() {
         auto sz = tok.Decode(viTokens);
         asm volatile("" : : "g"(sz) : "memory");
     });
