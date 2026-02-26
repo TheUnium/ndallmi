@@ -3,6 +3,7 @@ make-build/
 ndabs
 venv/
 .buildr/
+models/
 
 # Prerequisites
 *.d

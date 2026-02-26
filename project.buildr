@@ -8,6 +8,39 @@ project {
     cpp_standard = 20
 }
 
+executable "llm" {
+    src = [
+        globs { "src/Model/*.cpp" },
+        globs { "src/Tensor/*.cpp" },
+        globs { "src/Tests/*.cpp" },
+        globs { "src/Thread/*.cpp" },
+        globs { "src/Tokenizer/*.cpp" },
+        "src/main.cpp"
+    ],
+    include = {
+        public = ["src"]
+    },
+    configs {
+        debug {
+            defines = [],
+            flags = ["-g", "-Wall", "-Wextra", "-pthread"]
+        }
+        release {
+            defines = ["NDEBUG"],
+            flags = [
+                "-Wall",
+                "-Wextra",
+                "-O3",
+                "-ffast-math",
+                "-march=native",
+                "-flto",
+                "-funroll-loops",
+                "-pthread"
+            ]
+        }
+    }
+}
+
 executable "tests" {
     src = [
         globs { "src/Model/*.cpp" },
