@@ -1,6 +1,7 @@
 // Created by Unium on 24.02.26
 
 #include "mdMdLoad.hpp"
+#include "../Thread/mtThPool.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -8,12 +9,169 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 namespace fs = std::filesystem;
 namespace MD {
+
+// <<<s_start(mmap)
+// --- memory-mapped file
+/*---------------------------------------------------------
+ * FN: SMappedFile
+ * DESC: raii wrapper for mm file io to avoid copying entire
+ *       saftetensor thing into ram
+ * AUTH: unium (25.02.26)
+ *-------------------------------------------------------*/
+struct SMappedFile {
+    const uint8_t *pData = nullptr;
+    int64_t lSize = 0;
+
+#ifdef _WIN32
+    HANDLE hFile = INVALID_HANDLE_VALUE;
+    HANDLE hMapping = nullptr;
+#else
+    int iFd = -1;
+#endif
+
+    SMappedFile() = default;
+    SMappedFile(const SMappedFile &) = delete;
+    SMappedFile &operator=(const SMappedFile &) = delete;
+
+    SMappedFile(SMappedFile &&o) noexcept : pData(o.pData), lSize(o.lSize) {
+#ifdef _WIN32
+        hFile = o.hFile;
+        hMapping = o.hMapping;
+        o.hFile = INVALID_HANDLE_VALUE;
+        o.hMapping = nullptr;
+#else
+        iFd = o.iFd;
+        o.iFd = -1;
+#endif
+        o.pData = nullptr;
+        o.lSize = 0;
+    }
+
+    SMappedFile &operator=(SMappedFile &&o) noexcept {
+        if (this != &o) {
+            Close();
+            pData = o.pData;
+            lSize = o.lSize;
+#ifdef _WIN32
+            hFile = o.hFile;
+            hMapping = o.hMapping;
+            o.hFile = INVALID_HANDLE_VALUE;
+            o.hMapping = nullptr;
+#else
+            iFd = o.iFd;
+            o.iFd = -1;
+#endif
+            o.pData = nullptr;
+            o.lSize = 0;
+        }
+        return *this;
+    }
+
+    ~SMappedFile() { Close(); }
+
+    void Close() {
+#ifdef _WIN32
+        if (pData) {
+            UnmapViewOfFile(pData);
+            pData = nullptr;
+        }
+        if (hMapping) {
+            CloseHandle(hMapping);
+            hMapping = nullptr;
+        }
+        if (hFile != INVALID_HANDLE_VALUE) {
+            CloseHandle(hFile);
+            hFile = INVALID_HANDLE_VALUE;
+        }
+#else
+        if (pData && lSize > 0) {
+            munmap(const_cast<uint8_t *>(pData), lSize);
+            pData = nullptr;
+        }
+        if (iFd >= 0) {
+            close(iFd);
+            iFd = -1;
+        }
+#endif
+        lSize = 0;
+    }
+
+    auto bOpen(const std::string &szPath) -> bool {
+#ifdef _WIN32
+        hFile = CreateFileA(szPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        if (hFile == INVALID_HANDLE_VALUE)
+            return false;
+
+        LARGE_INTEGER liSize;
+        if (!GetFileSizeEx(hFile, &liSize)) {
+            CloseHandle(hFile);
+            hFile = INVALID_HANDLE_VALUE;
+            return false;
+        }
+        lSize = liSize.QuadPart;
+
+        hMapping = CreateFileMappingA(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+        if (!hMapping) {
+            CloseHandle(hFile);
+            hFile = INVALID_HANDLE_VALUE;
+            return false;
+        }
+
+        pData = (const uint8_t *)MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
+        if (!pData) {
+            CloseHandle(hMapping);
+            hMapping = nullptr;
+            CloseHandle(hFile);
+            hFile = INVALID_HANDLE_VALUE;
+            return false;
+        }
+        return true;
+#else
+        iFd = open(szPath.c_str(), O_RDONLY);
+        if (iFd < 0)
+            return false;
+
+        struct stat st;
+        if (fstat(iFd, &st) != 0) {
+            close(iFd);
+            iFd = -1;
+            return false;
+        }
+        lSize = st.st_size;
+
+        void *pMapped = mmap(nullptr, lSize, PROT_READ, MAP_PRIVATE, iFd, 0);
+        if (pMapped == MAP_FAILED) {
+            close(iFd);
+            iFd = -1;
+            return false;
+        }
+
+        madvise(pMapped, lSize, MADV_SEQUENTIAL);
+        pData = (const uint8_t *)pMapped;
+        return true;
+#endif
+    }
+};
+// >>>s_end(mmap)
 
 // <<<s_start(json)
 // --- json helpers
@@ -24,12 +182,14 @@ namespace MD {
  * AUTH: unium (24.02.26)
  *-------------------------------------------------------*/
 static auto szReadFileToString(const std::string &szPath) -> std::string {
-    std::ifstream ifs(szPath, std::ios::binary);
+    std::ifstream ifs(szPath, std::ios::binary | std::ios::ate);
     if (!ifs.is_open())
         return "";
-    std::ostringstream oss;
-    oss << ifs.rdbuf();
-    return oss.str();
+    auto lSize = ifs.tellg();
+    ifs.seekg(0);
+    std::string szBuf(lSize, '\0');
+    ifs.read(&szBuf[0], lSize);
+    return szBuf;
 }
 
 /*---------------------------------------------------------
@@ -531,7 +691,7 @@ static auto ParseSafetensorsHeader(const std::string &szHeader) -> std::unordere
         }
 
         SSafeTensorInfo sInfo = ParseTensorInfo(szHeader, lPos);
-        mTensors[szTensorName] = sInfo;
+        mTensors[szTensorName] = std::move(sInfo);
     }
 
     return mTensors;
@@ -546,7 +706,7 @@ static auto ParseSafetensorsHeader(const std::string &szHeader) -> std::unordere
  * PARMS: u16 (raw bfloat16 bits)
  * AUTH: unium (24.02.26)
  *-------------------------------------------------------*/
-static auto fBF16ToF32(uint16_t u16) -> float {
+static inline auto fBF16ToF32(uint16_t u16) -> float {
     uint32_t u32 = (uint32_t)u16 << 16;
     float fVal;
     std::memcpy(&fVal, &u32, sizeof(float));
@@ -559,7 +719,7 @@ static auto fBF16ToF32(uint16_t u16) -> float {
  * PARMS: u16 (raw float16 bits)
  * AUTH: unium (24.02.26)
  *-------------------------------------------------------*/
-static auto fFP16ToF32(uint16_t u16) -> float {
+static inline auto fFP16ToF32(uint16_t u16) -> float {
     uint32_t iSign = (u16 >> 15) & 0x1;
     uint32_t iExp = (u16 >> 10) & 0x1F;
     uint32_t iMant = u16 & 0x3FF;
@@ -589,13 +749,13 @@ static auto fFP16ToF32(uint16_t u16) -> float {
 }
 
 /*---------------------------------------------------------
- * FN: LoadTensorFromData
- * DESC: creates a CTensor from raw safetensors data with
- *       dtype conversion to f32 if needed
- * PARMS: pData (pointer into buffer), sInfo (tensor metadata)
+ * FN: LoadTensorFromMmap
+ * DESC: creates a CTensor from mmapd safetensors data with
+ *       parallel dtype conversion to f32 if needed
+ * PARMS: pFileData (pointer to data section start), sInfo (tensor metadata)
  * AUTH: unium (24.02.26)
  *-------------------------------------------------------*/
-static auto LoadTensorFromData(const uint8_t *pData, const SSafeTensorInfo &sInfo) -> MT::CTensor {
+static auto LoadTensorFromMmap(const uint8_t *pFileData, const SSafeTensorInfo &sInfo) -> MT::CTensor {
     std::vector<int64_t> vlShape = sInfo.vlShape;
     if (vlShape.empty())
         vlShape.push_back(1);
@@ -604,18 +764,24 @@ static auto LoadTensorFromData(const uint8_t *pData, const SSafeTensorInfo &sInf
     int64_t lNumel = tResult.lNumel();
     float *pfDst = tResult.pfData();
 
-    const uint8_t *pSrc = pData + sInfo.lDataStart;
+    const uint8_t *pSrc = pFileData + sInfo.lDataStart;
 
     if (sInfo.szDtype == "F32") {
         std::memcpy(pfDst, pSrc, lNumel * sizeof(float));
     } else if (sInfo.szDtype == "BF16") {
         const uint16_t *pU16 = reinterpret_cast<const uint16_t *>(pSrc);
-        for (int64_t i = 0; i < lNumel; i++)
-            pfDst[i] = fBF16ToF32(pU16[i]);
+        MT::TH::ParFor(lNumel, [pfDst, pU16](int64_t lStart, int64_t lEnd) {
+            for (int64_t i = lStart; i < lEnd; i++) {
+                uint32_t u32 = (uint32_t)pU16[i] << 16;
+                std::memcpy(&pfDst[i], &u32, sizeof(float));
+            }
+        });
     } else if (sInfo.szDtype == "F16") {
         const uint16_t *pU16 = reinterpret_cast<const uint16_t *>(pSrc);
-        for (int64_t i = 0; i < lNumel; i++)
-            pfDst[i] = fFP16ToF32(pU16[i]);
+        MT::TH::ParFor(lNumel, [pfDst, pU16](int64_t lStart, int64_t lEnd) {
+            for (int64_t i = lStart; i < lEnd; i++)
+                pfDst[i] = fFP16ToF32(pU16[i]);
+        });
     } else {
         std::cerr << "  warning: unsupported dtype '" << sInfo.szDtype << "', filling zeros" << std::endl;
     }
@@ -625,10 +791,12 @@ static auto LoadTensorFromData(const uint8_t *pData, const SSafeTensorInfo &sInf
 // >>>s_end(dtype)
 
 // <<<s_start(fileload)
-// --- safetensors file loading
+// --- safetensors file loading with mmap
 struct SSafetensorsFile {
     std::unordered_map<std::string, SSafeTensorInfo> mTensors;
-    std::vector<uint8_t> vData;
+    SMappedFile sMmap;
+    const uint8_t *pDataSection = nullptr;
+    int64_t lDataSize = 0;
 };
 
 /*---------------------------------------------------------
@@ -638,46 +806,37 @@ struct SSafetensorsFile {
  * AUTH: unium (24.02.26)
  *-------------------------------------------------------*/
 static auto bLoadSafetensorsFile(const std::string &szPath, SSafetensorsFile &sFile) -> bool {
-    std::ifstream ifs(szPath, std::ios::binary);
-    if (!ifs.is_open()) {
-        std::cerr << "  error: cannot open " << szPath << std::endl;
+    if (!sFile.sMmap.bOpen(szPath)) {
+        std::cerr << "  error: cannot mmap " << szPath << std::endl;
+        return false;
+    }
+
+    if (sFile.sMmap.lSize < 8) {
+        std::cerr << "  error: file too small " << szPath << std::endl;
         return false;
     }
 
     uint64_t lHeaderSize = 0;
-    ifs.read(reinterpret_cast<char *>(&lHeaderSize), 8);
-    if (!ifs.good()) {
-        std::cerr << "  error: cannot read header size from " << szPath << std::endl;
-        return false;
-    }
+    std::memcpy(&lHeaderSize, sFile.sMmap.pData, 8);
 
     if (lHeaderSize > 100 * 1024 * 1024) {
         std::cerr << "  error: header too large (" << lHeaderSize << " bytes)" << std::endl;
         return false;
     }
 
-    std::string szHeader(lHeaderSize, '\0');
-    ifs.read(&szHeader[0], lHeaderSize);
-    if (!ifs.good()) {
-        std::cerr << "  error: cannot read header from " << szPath << std::endl;
+    if ((int64_t)(8 + lHeaderSize) > sFile.sMmap.lSize) {
+        std::cerr << "  error: header exceeds file size" << std::endl;
         return false;
     }
 
+    std::string szHeader((const char *)(sFile.sMmap.pData + 8), lHeaderSize);
     sFile.mTensors = ParseSafetensorsHeader(szHeader);
 
-    auto lDataStart = ifs.tellg();
-    ifs.seekg(0, std::ios::end);
-    auto lFileSize = ifs.tellg();
-    int64_t lDataSize = (int64_t)lFileSize - (int64_t)lDataStart;
+    sFile.pDataSection = sFile.sMmap.pData + 8 + lHeaderSize;
+    sFile.lDataSize = sFile.sMmap.lSize - 8 - (int64_t)lHeaderSize;
 
-    if (lDataSize > 0) {
-        sFile.vData.resize(lDataSize);
-        ifs.seekg(lDataStart);
-        ifs.read(reinterpret_cast<char *>(sFile.vData.data()), lDataSize);
-    }
-
-    std::cout << "  loaded " << szPath << " (" << sFile.mTensors.size() << " tensors, " << (lDataSize / (1024 * 1024))
-              << " MB data)" << std::endl;
+    std::cout << "  mmap'd " << szPath << " (" << sFile.mTensors.size() << " tensors, "
+              << (sFile.lDataSize / (1024 * 1024)) << " MB data)" << std::endl;
 
     return true;
 }
@@ -708,7 +867,7 @@ static auto bFindAndLoadTensor(const std::vector<SSafetensorsFile> &vFiles, cons
     for (const auto &sFile : vFiles) {
         auto it = sFile.mTensors.find(szName);
         if (it != sFile.mTensors.end()) {
-            tOut = LoadTensorFromData(sFile.vData.data(), it->second);
+            tOut = LoadTensorFromMmap(sFile.pDataSection, it->second);
             return true;
         }
     }
@@ -754,10 +913,28 @@ auto bLoadModel(const std::string &szDirPath, SModel &sModel) -> bool {
 
     std::sort(vszFiles.begin(), vszFiles.end());
     std::cout << "  found " << vszFiles.size() << " safetensors file(s)" << std::endl;
-
     std::vector<SSafetensorsFile> vFiles(vszFiles.size());
-    for (size_t i = 0; i < vszFiles.size(); i++) {
-        if (!bLoadSafetensorsFile(vszFiles[i], vFiles[i]))
+
+    {
+        std::atomic<bool> bAnyFailed{false};
+        std::mutex mtxPrint;
+
+        if (vszFiles.size() > 1) {
+            std::vector<std::thread> vThreads;
+            for (size_t i = 0; i < vszFiles.size(); i++) {
+                vThreads.emplace_back([&, i]() {
+                    if (!bLoadSafetensorsFile(vszFiles[i], vFiles[i]))
+                        bAnyFailed.store(true);
+                });
+            }
+            for (auto &t : vThreads)
+                t.join();
+        } else {
+            if (!bLoadSafetensorsFile(vszFiles[0], vFiles[0]))
+                bAnyFailed.store(true);
+        }
+
+        if (bAnyFailed.load())
             return false;
     }
 
@@ -789,46 +966,63 @@ auto bLoadModel(const std::string &szDirPath, SModel &sModel) -> bool {
         sW.tOutputProj.m_bOwnsData = false;
         sW.tOutputProj.m_eType = sW.tTokEmbed.m_eType;
     }
+
     sW.vLayers.resize(sCfg.iNLayers);
 
-    for (int32_t iL = 0; iL < sCfg.iNLayers; iL++) {
-        auto &sLyr = sW.vLayers[iL];
-
+    struct SLayerLoadJob {
+        int32_t iLayer;
         bool bOk = true;
-        bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "input_layernorm.weight"), sLyr.tAttnNorm);
-        bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "self_attn.q_proj.weight"), sLyr.tWq);
-        bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "self_attn.k_proj.weight"), sLyr.tWk);
-        bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "self_attn.v_proj.weight"), sLyr.tWv);
-        bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "self_attn.o_proj.weight"), sLyr.tWo);
-        bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "post_attention_layernorm.weight"), sLyr.tFfnNorm);
-        bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "mlp.gate_proj.weight"), sLyr.tWGate);
-        bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "mlp.up_proj.weight"), sLyr.tWUp);
-        bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "mlp.down_proj.weight"), sLyr.tWDown);
+    };
 
-        if (!bOk) {
+    std::vector<SLayerLoadJob> vJobs(sCfg.iNLayers);
+    for (int32_t i = 0; i < sCfg.iNLayers; i++)
+        vJobs[i].iLayer = i;
+
+    std::mutex mtxLog;
+
+    MT::TH::ParFor((int64_t)sCfg.iNLayers, [&](int64_t lStart, int64_t lEnd) {
+        for (int64_t iIdx = lStart; iIdx < lEnd; iIdx++) {
+            int32_t iL = (int32_t)iIdx;
+            auto &sLyr = sW.vLayers[iL];
+            auto &sJob = vJobs[iL];
+
+            bool bOk = true;
+            bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "input_layernorm.weight"), sLyr.tAttnNorm);
+            bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "self_attn.q_proj.weight"), sLyr.tWq);
+            bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "self_attn.k_proj.weight"), sLyr.tWk);
+            bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "self_attn.v_proj.weight"), sLyr.tWv);
+            bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "self_attn.o_proj.weight"), sLyr.tWo);
+            bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "post_attention_layernorm.weight"), sLyr.tFfnNorm);
+            bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "mlp.gate_proj.weight"), sLyr.tWGate);
+            bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "mlp.up_proj.weight"), sLyr.tWUp);
+            bOk &= bFindAndLoadTensor(vFiles, szLayerKey(iL, "mlp.down_proj.weight"), sLyr.tWDown);
+
+            if (sCfg.bHasAttnBias) {
+                bFindAndLoadTensor(vFiles, szLayerKey(iL, "self_attn.q_proj.bias"), sLyr.tBq, false);
+                bFindAndLoadTensor(vFiles, szLayerKey(iL, "self_attn.k_proj.bias"), sLyr.tBk, false);
+                bFindAndLoadTensor(vFiles, szLayerKey(iL, "self_attn.v_proj.bias"), sLyr.tBv, false);
+                bFindAndLoadTensor(vFiles, szLayerKey(iL, "self_attn.o_proj.bias"), sLyr.tBo, false);
+            }
+            if (sCfg.bHasMlpBias) {
+                bFindAndLoadTensor(vFiles, szLayerKey(iL, "mlp.gate_proj.bias"), sLyr.tBGate, false);
+                bFindAndLoadTensor(vFiles, szLayerKey(iL, "mlp.up_proj.bias"), sLyr.tBUp, false);
+                bFindAndLoadTensor(vFiles, szLayerKey(iL, "mlp.down_proj.bias"), sLyr.tBDown, false);
+            }
+
+            sJob.bOk = bOk;
+
+            if ((iL + 1) % 8 == 0 || iL == sCfg.iNLayers - 1) {
+                std::lock_guard<std::mutex> lock(mtxLog);
+                std::cout << "  loaded layer " << iL + 1 << "/" << sCfg.iNLayers << std::endl;
+            }
+        }
+    });
+
+    for (int32_t iL = 0; iL < sCfg.iNLayers; iL++) {
+        if (!vJobs[iL].bOk) {
             std::cerr << "  error: missing weights for layer " << iL << std::endl;
             return false;
         }
-        if (sCfg.bHasAttnBias) {
-            bFindAndLoadTensor(vFiles, szLayerKey(iL, "self_attn.q_proj.bias"), sLyr.tBq, false);
-            bFindAndLoadTensor(vFiles, szLayerKey(iL, "self_attn.k_proj.bias"), sLyr.tBk, false);
-            bFindAndLoadTensor(vFiles, szLayerKey(iL, "self_attn.v_proj.bias"), sLyr.tBv, false);
-            bFindAndLoadTensor(vFiles, szLayerKey(iL, "self_attn.o_proj.bias"), sLyr.tBo, false);
-        }
-        if (sCfg.bHasMlpBias) {
-            bFindAndLoadTensor(vFiles, szLayerKey(iL, "mlp.gate_proj.bias"), sLyr.tBGate, false);
-            bFindAndLoadTensor(vFiles, szLayerKey(iL, "mlp.up_proj.bias"), sLyr.tBUp, false);
-            bFindAndLoadTensor(vFiles, szLayerKey(iL, "mlp.down_proj.bias"), sLyr.tBDown, false);
-        }
-
-        bool bUsesRope = true;
-        if (iL < (int32_t)sCfg.viNoRopeLayers.size())
-            bUsesRope = (sCfg.viNoRopeLayers[iL] == 0);
-
-        std::cout << "  loaded layer " << iL << "/" << sCfg.iNLayers << " (Wq: [" << sLyr.tWq.m_lShape[0] << ","
-                  << sLyr.tWq.m_lShape[1] << "]"
-                  << " Wk: [" << sLyr.tWk.m_lShape[0] << "," << sLyr.tWk.m_lShape[1] << "]"
-                  << (bUsesRope ? " RoPE" : " NoPE") << ")" << std::endl;
     }
 
     std::cout << "  model loaded successfully!" << std::endl;
@@ -968,47 +1162,76 @@ void QuantizeModel(SModel &sModel) {
 
     sW.vLayersQ8.resize(iNLayers);
 
-    int64_t lF32Bytes = 0;
-    int64_t lQ8Bytes = 0;
+    struct SQuantStats {
+        int64_t lF32Bytes = 0;
+        int64_t lQ8Bytes = 0;
+    };
 
-    for (int32_t iL = 0; iL < iNLayers; iL++) {
-        auto &sLyr = sW.vLayers[iL];
-        auto &sQ = sW.vLayersQ8[iL];
+    int iNumThreads = MT::TH::GetGlobalPool().iNumThreads();
+    std::vector<SQuantStats> vStats(iNumThreads);
 
-        sQ.qWq = MT::Q8::Quantize(sLyr.tWq);
-        sQ.qWk = MT::Q8::Quantize(sLyr.tWk);
-        sQ.qWv = MT::Q8::Quantize(sLyr.tWv);
-        sQ.qWo = MT::Q8::Quantize(sLyr.tWo);
-        sQ.qWGate = MT::Q8::Quantize(sLyr.tWGate);
-        sQ.qWUp = MT::Q8::Quantize(sLyr.tWUp);
-        sQ.qWDown = MT::Q8::Quantize(sLyr.tWDown);
+    std::mutex mtxLog;
 
-        lF32Bytes += sLyr.tWq.lNumel() * 4;
-        lF32Bytes += sLyr.tWk.lNumel() * 4;
-        lF32Bytes += sLyr.tWv.lNumel() * 4;
-        lF32Bytes += sLyr.tWo.lNumel() * 4;
-        lF32Bytes += sLyr.tWGate.lNumel() * 4;
-        lF32Bytes += sLyr.tWUp.lNumel() * 4;
-        lF32Bytes += sLyr.tWDown.lNumel() * 4;
+    MT::TH::ParFor((int64_t)iNLayers, [&](int64_t lStart, int64_t lEnd) {
+        int iTid = 0;
 
-        lQ8Bytes += sQ.qWq.lNumel() + sQ.qWq.lRows * 4;
-        lQ8Bytes += sQ.qWk.lNumel() + sQ.qWk.lRows * 4;
-        lQ8Bytes += sQ.qWv.lNumel() + sQ.qWv.lRows * 4;
-        lQ8Bytes += sQ.qWo.lNumel() + sQ.qWo.lRows * 4;
-        lQ8Bytes += sQ.qWGate.lNumel() + sQ.qWGate.lRows * 4;
-        lQ8Bytes += sQ.qWUp.lNumel() + sQ.qWUp.lRows * 4;
-        lQ8Bytes += sQ.qWDown.lNumel() + sQ.qWDown.lRows * 4;
+        {
+            int64_t lChunk = ((int64_t)iNLayers + iNumThreads - 1) / iNumThreads;
+            if (lChunk > 0)
+                iTid = (int)(lStart / lChunk);
+            if (iTid >= iNumThreads)
+                iTid = iNumThreads - 1;
+        }
+        auto &sStats = vStats[iTid];
 
-        sLyr.tWq = MT::CTensor();
-        sLyr.tWk = MT::CTensor();
-        sLyr.tWv = MT::CTensor();
-        sLyr.tWo = MT::CTensor();
-        sLyr.tWGate = MT::CTensor();
-        sLyr.tWUp = MT::CTensor();
-        sLyr.tWDown = MT::CTensor();
+        for (int64_t iIdx = lStart; iIdx < lEnd; iIdx++) {
+            int32_t iL = (int32_t)iIdx;
+            auto &sLyr = sW.vLayers[iL];
+            auto &sQ = sW.vLayersQ8[iL];
 
-        if ((iL + 1) % 8 == 0 || iL == iNLayers - 1)
-            std::cout << "  quantized layer " << iL + 1 << "/" << iNLayers << std::endl;
+            sQ.qWq = MT::Q8::Quantize(sLyr.tWq);
+            sQ.qWk = MT::Q8::Quantize(sLyr.tWk);
+            sQ.qWv = MT::Q8::Quantize(sLyr.tWv);
+            sQ.qWo = MT::Q8::Quantize(sLyr.tWo);
+            sQ.qWGate = MT::Q8::Quantize(sLyr.tWGate);
+            sQ.qWUp = MT::Q8::Quantize(sLyr.tWUp);
+            sQ.qWDown = MT::Q8::Quantize(sLyr.tWDown);
+
+            sStats.lF32Bytes += sLyr.tWq.lNumel() * 4;
+            sStats.lF32Bytes += sLyr.tWk.lNumel() * 4;
+            sStats.lF32Bytes += sLyr.tWv.lNumel() * 4;
+            sStats.lF32Bytes += sLyr.tWo.lNumel() * 4;
+            sStats.lF32Bytes += sLyr.tWGate.lNumel() * 4;
+            sStats.lF32Bytes += sLyr.tWUp.lNumel() * 4;
+            sStats.lF32Bytes += sLyr.tWDown.lNumel() * 4;
+
+            sStats.lQ8Bytes += sQ.qWq.lNumel() + sQ.qWq.lRows * 4;
+            sStats.lQ8Bytes += sQ.qWk.lNumel() + sQ.qWk.lRows * 4;
+            sStats.lQ8Bytes += sQ.qWv.lNumel() + sQ.qWv.lRows * 4;
+            sStats.lQ8Bytes += sQ.qWo.lNumel() + sQ.qWo.lRows * 4;
+            sStats.lQ8Bytes += sQ.qWGate.lNumel() + sQ.qWGate.lRows * 4;
+            sStats.lQ8Bytes += sQ.qWUp.lNumel() + sQ.qWUp.lRows * 4;
+            sStats.lQ8Bytes += sQ.qWDown.lNumel() + sQ.qWDown.lRows * 4;
+
+            sLyr.tWq = MT::CTensor();
+            sLyr.tWk = MT::CTensor();
+            sLyr.tWv = MT::CTensor();
+            sLyr.tWo = MT::CTensor();
+            sLyr.tWGate = MT::CTensor();
+            sLyr.tWUp = MT::CTensor();
+            sLyr.tWDown = MT::CTensor();
+
+            if ((iL + 1) % 8 == 0 || iL == iNLayers - 1) {
+                std::lock_guard<std::mutex> lock(mtxLog);
+                std::cout << "  quantized layer " << iL + 1 << "/" << iNLayers << std::endl;
+            }
+        }
+    });
+
+    int64_t lF32Bytes = 0, lQ8Bytes = 0;
+    for (const auto &s : vStats) {
+        lF32Bytes += s.lF32Bytes;
+        lQ8Bytes += s.lQ8Bytes;
     }
 
     sW.bQuantized = true;
