@@ -5,6 +5,8 @@ venv/
 .buildr/
 models/
 log.txt
+llm
+tests
 
 # Prerequisites
 *.d
