@@ -4,6 +4,7 @@ ndabs
 venv/
 .buildr/
 models/
+log.txt
 
 # Prerequisites
 *.d
